@@ -127,7 +127,7 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
             
             var container = centerEl.closest('[data-e2e="recommend-list-item-container"], [class*="DivItemContainer"], [class*="DivVideoWrapper"], article, [data-e2e="feed-video"]') || centerEl;
 
-            // --- 2. TikTok Specific: Extract by Unique Video ID ---
+            // --- 2. TikTok Specific: Extract by Unique Video ID from Active Container ---
             var tiktokLink = container.querySelector('a[href*="/video/"]') || document.querySelector('a[href*="/video/"]');
             var videoIdMatch = (tiktokLink && tiktokLink.href) ? tiktokLink.href.match(/\\/video\\/(\\d+)/) : window.location.pathname.match(/\\/video\\/(\\d+)/);
             var videoId = videoIdMatch ? videoIdMatch[1] : null;
@@ -278,7 +278,8 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
             }
             request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
             request.setValue("*/*", forHTTPHeaderField: "Accept")
-            request.setValue("https://www.google.com", forHTTPHeaderField: "Referer")
+            request.setValue("https://www.tiktok.com/", forHTTPHeaderField: "Referer")
+            request.setValue("bytes=0-", forHTTPHeaderField: "Range")
             
             let task = self.downloadSession.downloadTask(with: request)
             self.activeTasks[task.taskIdentifier] = (serviceName: serviceName, quality: quality)
@@ -347,6 +348,20 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
         let destinationURL = downloadsDirectory.appendingPathComponent(filename)
         
         do {
+            // Verify downloaded file size and type
+            let attributes = try FileManager.default.attributesOfItem(atPath: location.path)
+            let fileSize = attributes[.size] as? Int64 ?? 0
+            
+            // If downloaded file is too small (e.g. less than 10 KB), it might be an invalid response
+            if fileSize < 10000 {
+                DispatchQueue.main.async {
+                    self.delegate?.didFailDownload(error: "Stream expired or protected")
+                    self.showErrorAlert(message: "The video stream could not be downloaded.\nPlease try again or switch video quality.")
+                }
+                activeTasks.removeValue(forKey: downloadTask.taskIdentifier)
+                return
+            }
+            
             if FileManager.default.fileExists(atPath: destinationURL.path) {
                 try FileManager.default.removeItem(at: destinationURL)
             }
