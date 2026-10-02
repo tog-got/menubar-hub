@@ -97,7 +97,6 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 if (!url || typeof url !== 'string' || url.indexOf('http') !== 0) return false;
                 var lower = url.toLowerCase();
                 
-                // Strictly exclude images, thumbnails, and avatars
                 if (lower.indexOf('.jpeg') !== -1 || lower.indexOf('.jpg') !== -1 ||
                     lower.indexOf('.png') !== -1 || lower.indexOf('.webp') !== -1 ||
                     lower.indexOf('~tplv') !== -1 || lower.indexOf('/obj/tos-alisg-p-') !== -1 ||
@@ -107,7 +106,6 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                     return false;
                 }
                 
-                // Must match genuine video stream patterns
                 if (lower.indexOf('.mp4') !== -1 || lower.indexOf('mime_type=video_mp4') !== -1 ||
                     lower.indexOf('/video/tos/') !== -1 || lower.indexOf('video_id=') !== -1 ||
                     lower.indexOf('&bytestart=') !== -1 || lower.indexOf('mime=video') !== -1 ||
@@ -120,69 +118,61 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 return false;
             }
 
-            var results = [];
+            // --- 1. Find the Exact Active Video in Center of Viewport ---
             var vpCenterY = window.innerHeight / 2;
             var allVideos = Array.from(document.querySelectorAll('video'));
 
-            // 1. Prioritize currently playing video in viewport
-            var sortedVideos = allVideos.sort(function(a, b) {
-                var aPlaying = (!a.paused && a.currentTime > 0) ? 1 : 0;
-                var bPlaying = (!b.paused && b.currentTime > 0) ? 1 : 0;
-                if (aPlaying !== bPlaying) return bPlaying - aPlaying;
+            var activeVideo = allVideos.find(function(v) { return !v.paused && v.currentTime > 0; });
+            if (!activeVideo && allVideos.length > 0) {
+                activeVideo = allVideos.sort(function(a, b) {
+                    var rA = a.getBoundingClientRect();
+                    var rB = b.getBoundingClientRect();
+                    return Math.abs((rA.top + rA.height / 2) - vpCenterY) - Math.abs((rB.top + rB.height / 2) - vpCenterY);
+                })[0];
+            }
 
-                var rA = a.getBoundingClientRect();
-                var rB = b.getBoundingClientRect();
-                var distA = Math.abs((rA.top + rA.height / 2) - vpCenterY);
-                var distB = Math.abs((rB.top + rB.height / 2) - vpCenterY);
-                return distA - distB;
-            });
+            var chosenUrl = null;
 
-            // 2. Extract strictly valid video URLs from sorted video tags
-            for (var i = 0; i < sortedVideos.length; i++) {
-                var v = sortedVideos[i];
-                var s = v.currentSrc || v.src;
+            // Priority 1: Check if active video has bound exact stream URL from sniffer
+            if (activeVideo && activeVideo.__exactMediaUrl && isValidVideoUrl(activeVideo.__exactMediaUrl)) {
+                chosenUrl = activeVideo.__exactMediaUrl;
+            }
+
+            // Priority 2: Check active video currentSrc / src
+            if (!chosenUrl && activeVideo) {
+                var s = activeVideo.currentSrc || activeVideo.src;
                 if (!s || s.indexOf('blob:') === 0) {
-                    var srcEl = v.querySelector('source');
+                    var srcEl = activeVideo.querySelector('source');
                     if (srcEl) s = srcEl.src;
                 }
                 if (!s || s.indexOf('blob:') === 0) {
-                    s = v.getAttribute('src') || v.getAttribute('data-src');
+                    s = activeVideo.getAttribute('src') || activeVideo.getAttribute('data-src');
                 }
                 if (isValidVideoUrl(s)) {
-                    results.push(s);
+                    chosenUrl = s;
                 }
             }
 
-            // 3. Performance network entries (filtered strictly for video streams)
-            try {
-                var entries = window.performance.getEntriesByType('resource') || [];
-                for (var j = entries.length - 1; j >= 0; j--) {
-                    var name = entries[j].name || '';
-                    if (isValidVideoUrl(name)) {
-                        results.push(name);
-                    }
-                }
-            } catch(e) {}
-
-            // 4. Safe React property scan for active video container
-            if (sortedVideos.length > 0) {
-                var el = sortedVideos[0];
+            // Priority 3: Scan React Fiber on active video's parent container
+            if (!chosenUrl && activeVideo) {
+                var el = activeVideo;
                 var count = 0;
-                while (el && el !== document.body && count < 6) {
+                while (el && el !== document.body && count < 8) {
                     count++;
                     for (var key in el) {
                         if (key.indexOf('__react') === 0) {
                             try {
                                 var val = el[key];
                                 function safeScan(obj, depth) {
-                                    if (!obj || depth > 3 || typeof obj !== 'object') return;
+                                    if (!obj || depth > 4 || typeof obj !== 'object' || chosenUrl) return;
                                     var propKeys = Object.keys(obj);
                                     for (var k = 0; k < propKeys.length; k++) {
                                         var p = propKeys[k];
                                         if (typeof obj[p] === 'string') {
                                             var str = obj[p];
                                             if (isValidVideoUrl(str)) {
-                                                results.push(str.replace(/\\\\u0026/g, '&').replace(/\\\\/g, ''));
+                                                chosenUrl = str.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
+                                                return;
                                             }
                                         } else if (typeof obj[p] === 'object' && obj[p] !== null && !Array.isArray(obj[p])) {
                                             safeScan(obj[p], depth + 1);
@@ -193,21 +183,29 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                             } catch(e) {}
                         }
                     }
+                    if (chosenUrl) break;
                     el = el.parentElement;
                 }
             }
 
-            // Deduplicate candidates
-            var uniqueList = results.filter(function(item, pos, self) {
-                return self.indexOf(item) === pos;
-            });
-
-            if (uniqueList.length === 0) {
-                postError("No active video stream detected.\\nPlease play the video on screen, then click Download.");
-                return;
+            // Priority 4: Performance network entries
+            if (!chosenUrl) {
+                try {
+                    var entries = window.performance.getEntriesByType('resource') || [];
+                    for (var j = entries.length - 1; j >= 0; j--) {
+                        var name = entries[j].name || '';
+                        if (isValidVideoUrl(name)) {
+                            chosenUrl = name;
+                            break;
+                        }
+                    }
+                } catch(e) {}
             }
 
-            var chosenUrl = uniqueList[0];
+            if (!chosenUrl) {
+                postError("No active video stream detected.\\nPlease start playing the video on screen, then try again.");
+                return;
+            }
 
             // Attempt in-browser blob fetch first, fallback to native Swift URLSession
             fetch(chosenUrl, { credentials: 'include' })

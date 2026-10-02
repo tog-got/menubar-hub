@@ -122,61 +122,66 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
                 observer.observe(target, { subtree: true, characterData: true, childList: true });
             }
 
-            // Universal Media Sniffer (Max Video Downloader Engine)
-            window.__menubarHubDetectedVideos = window.__menubarHubDetectedVideos || [];
-
-            function registerVideo(url, label) {
-                if (!url || typeof url !== 'string' || url.indexOf('http') !== 0) return;
-                var cleanUrl = url.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
-                for (var i = 0; i < window.__menubarHubDetectedVideos.length; i++) {
-                    if (window.__menubarHubDetectedVideos[i].url === cleanUrl) return;
+            function isVideoMediaUrl(url) {
+                if (!url || typeof url !== 'string' || url.indexOf('http') !== 0) return false;
+                var lower = url.toLowerCase();
+                if (lower.indexOf('.jpeg') !== -1 || lower.indexOf('.jpg') !== -1 ||
+                    lower.indexOf('.png') !== -1 || lower.indexOf('.webp') !== -1 ||
+                    lower.indexOf('~tplv') !== -1 || lower.indexOf('/obj/tos-alisg-p-') !== -1 ||
+                    lower.indexOf('/obj/tos-maliva-p-') !== -1 || lower.indexOf('mime=image') !== -1 ||
+                    lower.indexOf('format=jpg') !== -1 || lower.indexOf('avatar') !== -1 ||
+                    lower.indexOf('/image/') !== -1 || lower.indexOf('cover') !== -1) {
+                    return false;
                 }
-                window.__menubarHubDetectedVideos.unshift({
-                    url: cleanUrl,
-                    title: document.title || "Video",
-                    quality: label || "HD 1080p",
-                    time: Date.now()
-                });
-                if (window.__menubarHubDetectedVideos.length > 25) window.__menubarHubDetectedVideos.pop();
+                if (lower.indexOf('.mp4') !== -1 || lower.indexOf('mime_type=video_mp4') !== -1 ||
+                    lower.indexOf('/video/tos/') !== -1 || lower.indexOf('video_id=') !== -1 ||
+                    lower.indexOf('&bytestart=') !== -1 || lower.indexOf('mime=video') !== -1 ||
+                    (lower.indexOf('cdninstagram.com') !== -1 && lower.indexOf('&efg=') !== -1) ||
+                    (lower.indexOf('tiktokcdn.com') !== -1 && lower.indexOf('/video/') !== -1) ||
+                    (lower.indexOf('byteoversea.com') !== -1 && lower.indexOf('/video/') !== -1) ||
+                    (lower.indexOf('ibytedtos.com') !== -1 && lower.indexOf('/video/') !== -1)) {
+                    return true;
+                }
+                return false;
             }
 
-            // 1. Hook HTMLMediaElement play & src
-            try {
-                var origPlay = HTMLMediaElement.prototype.play;
-                HTMLMediaElement.prototype.play = function() {
-                    var s = this.currentSrc || this.src;
-                    if (s && s.indexOf('http') === 0) {
-                        var q = (this.videoHeight && this.videoHeight >= 1080) ? "1080p HD" : ((this.videoHeight && this.videoHeight >= 720) ? "720p HD" : "HD Original");
-                        registerVideo(s, q);
-                    }
-                    return origPlay.apply(this, arguments);
-                };
-            } catch(e) {}
+            // Bind intercepted network video URL to the active playing video element
+            function bindUrlToActiveVideo(url) {
+                if (!isVideoMediaUrl(url)) return;
+                var clean = url.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
+                var videos = Array.from(document.querySelectorAll('video'));
+                var playing = videos.find(function(v) { return !v.paused && v.currentTime > 0; });
+                if (playing) {
+                    playing.__exactMediaUrl = clean;
+                } else if (videos.length > 0) {
+                    var vpY = window.innerHeight / 2;
+                    var centerVid = videos.sort(function(a, b) {
+                        var rA = a.getBoundingClientRect();
+                        var rB = b.getBoundingClientRect();
+                        return Math.abs((rA.top + rA.height / 2) - vpY) - Math.abs((rB.top + rB.height / 2) - vpY);
+                    })[0];
+                    if (centerVid) centerVid.__exactMediaUrl = clean;
+                }
+            }
 
-            // 2. Hook Fetch requests for TikTok, Instagram, FB, Threads, X CDN links
+            // 1. Hook Fetch
             try {
                 var origFetch = window.fetch;
                 window.fetch = function() {
                     var url = (typeof arguments[0] === 'string') ? arguments[0] : (arguments[0] && arguments[0].url);
                     if (url && typeof url === 'string') {
-                        if (url.includes('.mp4') || url.includes('mime_type=video_mp4') || url.includes('video_id=') ||
-                            url.includes('tiktokcdn.com') || url.includes('cdninstagram.com') || url.includes('fbcdn.net') ||
-                            url.includes('byteoversea.com') || url.includes('ibytedtos.com') || url.includes('twimg.com')) {
-                            registerVideo(url, "1080p HD");
-                        }
+                        bindUrlToActiveVideo(url);
                     }
                     return origFetch.apply(this, arguments);
                 };
             } catch(e) {}
 
-            // 3. Hook XMLHttpRequest
+            // 2. Hook XMLHttpRequest
             try {
                 var origOpen = XMLHttpRequest.prototype.open;
                 XMLHttpRequest.prototype.open = function(method, url) {
                     if (url && typeof url === 'string') {
-                        if (url.includes('.mp4') || url.includes('mime_type=video_mp4') || url.includes('tiktokcdn.com') || url.includes('cdninstagram.com') || url.includes('fbcdn.net')) {
-                            registerVideo(url, "1080p HD");
-                        }
+                        bindUrlToActiveVideo(url);
                     }
                     return origOpen.apply(this, arguments);
                 };
@@ -273,14 +278,21 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
                 var videos = document.querySelectorAll('video');
                 videos.forEach(function(video) {
                     var s = video.currentSrc || video.src;
-                    if (s && s.indexOf('http') === 0) {
-                        registerVideo(s, (video.videoHeight && video.videoHeight >= 1080) ? "1080p HD" : "720p HD");
+                    if (s && isVideoMediaUrl(s)) {
+                        video.__exactMediaUrl = s;
                     }
 
                     if (video.__menubarHubAttached) return;
                     video.__menubarHubAttached = true;
 
                     var lastTime = 0;
+
+                    video.addEventListener('play', function() {
+                        var curS = video.currentSrc || video.src;
+                        if (curS && isVideoMediaUrl(curS)) {
+                            video.__exactMediaUrl = curS;
+                        }
+                    });
 
                     video.addEventListener('ended', function() {
                         advanceToNextVideo();
