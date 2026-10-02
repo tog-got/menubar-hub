@@ -78,125 +78,103 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 });
             }
 
-            // --- STEP 1: Pinpoint the EXACT Container in Viewport Center ---
+            var results = [];
             var vpCenterY = window.innerHeight / 2;
-            
-            // Candidate containers per platform
-            var containerSelectors = [
-                '[data-e2e="recommend-list-item-container"]',
-                '[class*="DivItemContainerV2"]',
-                '[class*="DivVideoWrapper"]',
-                'article',
-                'div[role="dialog"]',
-                'div[data-e2e="feed-video"]',
-                'div[data-e2e="search-card-video"]',
-                'div[tabindex="-1"]'
-            ];
-            
-            var containers = Array.from(document.querySelectorAll(containerSelectors.join(',')));
-            var activeContainer = null;
-            
-            if (containers.length > 0) {
-                // Find container spanning across viewport center
-                activeContainer = containers.find(function(c) {
-                    var r = c.getBoundingClientRect();
-                    return r.top <= vpCenterY && r.bottom >= vpCenterY;
-                });
-                
-                // Fallback: pick the one with largest visible area
-                if (!activeContainer) {
-                    activeContainer = containers.sort(function(a, b) {
-                        var rA = a.getBoundingClientRect();
-                        var rB = b.getBoundingClientRect();
-                        var hA = Math.max(0, Math.min(rA.bottom, window.innerHeight) - Math.max(rA.top, 0));
-                        var hB = Math.max(0, Math.min(rB.bottom, window.innerHeight) - Math.max(rB.top, 0));
-                        return hB - hA;
-                    })[0];
+            var allVideos = Array.from(document.querySelectorAll('video'));
+
+            // 1. Sort video elements: playing first, then closest to center of screen
+            var sortedVideos = allVideos.sort(function(a, b) {
+                var aPlaying = (!a.paused && a.currentTime > 0) ? 1 : 0;
+                var bPlaying = (!b.paused && b.currentTime > 0) ? 1 : 0;
+                if (aPlaying !== bPlaying) return bPlaying - aPlaying;
+
+                var rA = a.getBoundingClientRect();
+                var rB = b.getBoundingClientRect();
+                var distA = Math.abs((rA.top + rA.height / 2) - vpCenterY);
+                var distB = Math.abs((rB.top + rB.height / 2) - vpCenterY);
+                return distA - distB;
+            });
+
+            // 2. Extract directly from sorted video elements
+            for (var i = 0; i < sortedVideos.length; i++) {
+                var v = sortedVideos[i];
+                var s = v.currentSrc || v.src;
+                if (!s || s.indexOf('blob:') === 0) {
+                    var srcEl = v.querySelector('source');
+                    if (srcEl) s = srcEl.src;
+                }
+                if (!s || s.indexOf('blob:') === 0) {
+                    s = v.getAttribute('src') || v.getAttribute('data-src');
+                }
+                if (s && s.indexOf('http') === 0 && s.indexOf('blob:') !== 0) {
+                    results.push(s);
                 }
             }
 
-            // Find the video element strictly inside the active container first
-            var targetVideo = activeContainer ? activeContainer.querySelector('video') : null;
-            
-            // Fallback: check globally playing video
-            if (!targetVideo) {
-                var allVideos = Array.from(document.querySelectorAll('video'));
-                targetVideo = allVideos.find(function(v) { return !v.paused && v.currentTime > 0; });
-                if (!targetVideo && allVideos.length > 0) {
-                    targetVideo = allVideos.sort(function(a, b) {
-                        var rA = a.getBoundingClientRect();
-                        var rB = b.getBoundingClientRect();
-                        return Math.abs((rA.top + rA.height / 2) - vpCenterY) - Math.abs((rB.top + rB.height / 2) - vpCenterY);
-                    })[0];
-                }
-            }
-
-            if (!targetVideo && !activeContainer) {
-                postError("No active video found on screen.\\nPlease play the video first.");
-                return;
-            }
-
-            var exactUrl = null;
-
-            // --- STEP 2: Extract from React Props of the Active Element (TikTok & Meta) ---
-            function extractUrlFromReact(el) {
-                if (!el) return null;
-                var keys = Object.keys(el);
-                for (var i = 0; i < keys.length; i++) {
-                    if (keys[i].startsWith('__reactProps') || keys[i].startsWith('__reactFiber')) {
-                        try {
-                            var json = JSON.stringify(el[keys[i]]);
-                            if (json) {
-                                // Match direct MP4 / CDN video URLs
-                                var matches = json.match(/https:\\/\\/[^"\\s]+\\.(?:mp4|byteoversea|ibytedtos|tiktokcdn|cdninstagram|fbcdn)[^"\\s]*/g);
-                                if (matches && matches.length > 0) {
-                                    return matches[0].replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
+            // 3. Safe non-circular search in React Fiber props of active video & parent elements
+            if (sortedVideos.length > 0) {
+                var el = sortedVideos[0];
+                var count = 0;
+                while (el && el !== document.body && count < 8) {
+                    count++;
+                    for (var key in el) {
+                        if (key.indexOf('__react') === 0) {
+                            try {
+                                var val = el[key];
+                                function safeScan(obj, depth) {
+                                    if (!obj || depth > 3 || typeof obj !== 'object') return;
+                                    var propKeys = Object.keys(obj);
+                                    for (var k = 0; k < propKeys.length; k++) {
+                                        var p = propKeys[k];
+                                        if (typeof obj[p] === 'string') {
+                                            var str = obj[p];
+                                            if (str.indexOf('http') === 0 && (str.indexOf('.mp4') !== -1 || str.indexOf('byteoversea') !== -1 || str.indexOf('tiktokcdn') !== -1 || str.indexOf('cdninstagram') !== -1 || str.indexOf('fbcdn') !== -1 || str.indexOf('ibytedtos') !== -1)) {
+                                                results.push(str.replace(/\\\\u0026/g, '&').replace(/\\\\/g, ''));
+                                            }
+                                        } else if (typeof obj[p] === 'object' && obj[p] !== null && !Array.isArray(obj[p])) {
+                                            safeScan(obj[p], depth + 1);
+                                        }
+                                    }
                                 }
-                            }
-                        } catch(e) {}
+                                safeScan(val, 0);
+                            } catch(e) {}
+                        }
+                    }
+                    el = el.parentElement;
+                }
+            }
+
+            // 4. Performance resource entries (most recent network requests)
+            try {
+                var entries = window.performance.getEntriesByType('resource') || [];
+                for (var j = entries.length - 1; j >= 0; j--) {
+                    var name = entries[j].name || '';
+                    if (name.indexOf('http') === 0 && (name.indexOf('.mp4') !== -1 || name.indexOf('mime_type=video_mp4') !== -1 || name.indexOf('tiktokcdn') !== -1 || name.indexOf('byteoversea') !== -1 || name.indexOf('cdninstagram') !== -1 || name.indexOf('fbcdn.net') !== -1 || name.indexOf('twimg.com') !== -1)) {
+                        results.push(name);
                     }
                 }
-                return null;
-            }
+            } catch(e) {}
 
-            if (targetVideo) exactUrl = extractUrlFromReact(targetVideo);
-            if (!exactUrl && activeContainer) exactUrl = extractUrlFromReact(activeContainer);
+            // 5. Meta tags
+            try {
+                var meta = document.querySelector('meta[property="og:video"], meta[property="og:video:secure_url"]');
+                if (meta && meta.content && meta.content.indexOf('http') === 0) results.push(meta.content);
+            } catch(e) {}
 
-            // --- STEP 3: Extract from Video Element DOM Attributes ---
-            if (!exactUrl && targetVideo) {
-                var vSrc = targetVideo.currentSrc || targetVideo.src;
-                if (!vSrc || vSrc.indexOf('blob:') === 0) {
-                    var source = targetVideo.querySelector('source');
-                    if (source) vSrc = source.src;
-                }
-                if (!vSrc || vSrc.indexOf('blob:') === 0) {
-                    vSrc = targetVideo.getAttribute('src') || targetVideo.getAttribute('data-src');
-                }
-                if (vSrc && vSrc.indexOf('http') === 0) {
-                    exactUrl = vSrc;
-                }
-            }
+            // Deduplicate candidates
+            var uniqueList = results.filter(function(item, pos, self) {
+                return self.indexOf(item) === pos;
+            });
 
-            // --- STEP 4: Fallback to Container Links ---
-            if (!exactUrl && activeContainer) {
-                var sources = activeContainer.querySelectorAll('source, a[href*=".mp4"]');
-                for (var k = 0; k < sources.length; k++) {
-                    var h = sources[k].src || sources[k].href;
-                    if (h && h.indexOf('http') === 0) {
-                        exactUrl = h;
-                        break;
-                    }
-                }
-            }
-
-            if (!exactUrl) {
-                postError("Could not retrieve video stream URL.\\nPlease ensure the video is currently playing.");
+            if (uniqueList.length === 0) {
+                postError("No active video stream detected.\\nPlease start playing the video on screen, then try again.");
                 return;
             }
 
-            // --- STEP 5: Dispatch Download ---
-            // Attempt in-browser blob fetch first, fallback to native Swift URLSession
-            fetch(exactUrl, { credentials: 'include' })
+            var chosenUrl = uniqueList[0];
+
+            // Dispatch download: attempt in-browser blob fetch first, fallback to native Swift URLSession
+            fetch(chosenUrl, { credentials: 'include' })
                 .then(function(res) {
                     if (!res.ok) throw new Error("HTTP error " + res.status);
                     return res.blob();
@@ -208,13 +186,13 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                         if (base64 && base64.length > 500) {
                             postSuccessData(base64);
                         } else {
-                            postDirectUrl(exactUrl);
+                            postDirectUrl(chosenUrl);
                         }
                     };
                     reader.readAsDataURL(blob);
                 })
                 .catch(function(err) {
-                    postDirectUrl(exactUrl);
+                    postDirectUrl(chosenUrl);
                 });
         })();
         """
