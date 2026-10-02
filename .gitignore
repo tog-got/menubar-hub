@@ -1,0 +1,8 @@
+# Build outputs
+MenuBarHub
+MenuBarHub.app
+*.o
+*.swiftdoc
+*.swiftmodule
+.DS_Store
+/tmp/MenuBarHub.iconset
