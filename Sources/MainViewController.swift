@@ -462,12 +462,12 @@ public class MainViewController: NSViewController {
     // MARK: - Video Downloader Action
     private func updateDownloadButtonUI() {
         if #available(macOS 11.0, *) {
-            let config = NSImage.SymbolConfiguration(paletteColors: [NSColor.systemTeal])
-            downloadBtn.image = NSImage(systemSymbolName: "arrow.down.to.line.circle.fill", accessibilityDescription: "Download Video")?.withSymbolConfiguration(config)
+            let config = NSImage.SymbolConfiguration(paletteColors: [NSColor.systemBlue])
+            downloadBtn.image = NSImage(systemSymbolName: "arrow.down.to.line", accessibilityDescription: "Download Video")?.withSymbolConfiguration(config)
         } else {
-            downloadBtn.title = "⬇️"
+            downloadBtn.title = "⬇"
         }
-        downloadBtn.toolTip = "Download Active Video (Choose Quality)"
+        downloadBtn.toolTip = "Download Video (Choose Quality)"
     }
     
     @objc private func showDownloadMenu(_ sender: NSButton) {

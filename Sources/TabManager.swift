@@ -54,7 +54,7 @@ public class TabManager {
             }
         }
         
-        // Inject script bridge untuk notifikasi
+        // Inject script bridge untuk notifikasi dan download handler
         let userScript = WKUserScript(
             source: NotificationBridge.injectedJavaScript,
             injectionTime: .atDocumentEnd,
@@ -63,6 +63,7 @@ public class TabManager {
         config.userContentController.addUserScript(userScript)
         config.userContentController.add(NotificationBridge.shared, name: "notificationHandler")
         config.userContentController.add(NotificationBridge.shared, name: "titleHandler")
+        config.userContentController.add(VideoDownloader.shared, name: "videoSaveHandler")
         
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
         

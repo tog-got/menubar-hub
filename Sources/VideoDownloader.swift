@@ -3,7 +3,7 @@ import AppKit
 import WebKit
 import UserNotifications
 
-public class VideoDownloader: NSObject, URLSessionDownloadDelegate {
+public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownloadDelegate {
     public static let shared = VideoDownloader()
     
     private var downloadSession: URLSession!
@@ -16,16 +16,36 @@ public class VideoDownloader: NSObject, URLSessionDownloadDelegate {
         self.downloadSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }
     
-    public static var videoExtractorScript: String {
-        return """
+    public func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "videoSaveHandler", let dict = message.body as? [String: Any] {
+            if let base64Data = dict["dataBase64"] as? String,
+               let serviceName = dict["service"] as? String,
+               let data = Data(base64Encoded: base64Data) {
+                
+                saveVideoData(data, serviceName: serviceName)
+            } else if let errorMsg = dict["error"] as? String {
+                DispatchQueue.main.async {
+                    self.showErrorAlert(message: errorMsg)
+                }
+            }
+        }
+    }
+    
+    public func downloadVideo(from webView: WKWebView, service: ServiceID, quality: String) {
+        let script = """
         (function() {
+            var service = "\(service.name)";
+            var quality = "\(quality)";
+            
+            // 1. Gather all video elements on the page
             var videos = Array.from(document.querySelectorAll('video'));
-            if (videos.length === 0) return { error: "No video elements found on page." };
+            if (videos.length === 0) {
+                window.webkit.messageHandlers.videoSaveHandler.postMessage({ error: "No video player found on screen." });
+                return;
+            }
             
-            // Priority 1: Find currently playing video
+            // 2. Select the currently playing or most prominent video
             var target = videos.find(function(v) { return !v.paused && v.currentTime > 0; });
-            
-            // Priority 2: Find video in center of screen / largest visible
             if (!target) {
                 target = videos.sort(function(a, b) {
                     var rA = a.getBoundingClientRect();
@@ -34,70 +54,59 @@ public class VideoDownloader: NSObject, URLSessionDownloadDelegate {
                 })[0];
             }
             
-            if (!target) return { error: "No active video found." };
-            
-            var src = target.currentSrc || target.src;
-            if (!src || src.indexOf('http') !== 0) {
-                var source = target.querySelector('source');
-                if (source) src = source.src;
+            if (!target) {
+                window.webkit.messageHandlers.videoSaveHandler.postMessage({ error: "No active video stream found." });
+                return;
             }
             
-            // Fallback: Check preload links or video attributes
-            if (!src || src.indexOf('http') !== 0) {
-                src = target.getAttribute('src') || target.getAttribute('data-src');
+            var videoSrc = target.currentSrc || target.src;
+            if (!videoSrc) {
+                var sourceEl = target.querySelector('source');
+                if (sourceEl) videoSrc = sourceEl.src;
             }
             
-            if (!src) return { error: "Video source is encrypted or streaming via segmented blob." };
+            if (!videoSrc) {
+                window.webkit.messageHandlers.videoSaveHandler.postMessage({ error: "Video source is protected or not yet loaded." });
+                return;
+            }
             
-            return {
-                url: src,
-                title: document.title || "Video",
-                duration: target.duration || 0
-            };
+            // 3. Fetch video blob directly in page context (shares all cookies & session headers)
+            fetch(videoSrc, { credentials: 'include', mode: 'cors' })
+                .then(function(response) {
+                    if (!response.ok) throw new Error("HTTP Status: " + response.status);
+                    return response.blob();
+                })
+                .then(function(blob) {
+                    var reader = new FileReader();
+                    reader.onloadend = function() {
+                        var base64 = reader.result.split(',')[1];
+                        window.webkit.messageHandlers.videoSaveHandler.postMessage({
+                            dataBase64: base64,
+                            service: service,
+                            quality: quality
+                        });
+                    };
+                    reader.readAsDataURL(blob);
+                })
+                .catch(function(err) {
+                    // Fallback to direct URL download if fetch is blocked
+                    window.webkit.messageHandlers.videoSaveHandler.postMessage({
+                        directUrl: videoSrc,
+                        service: service,
+                        quality: quality
+                    });
+                });
         })();
         """
-    }
-    
-    public func downloadVideo(from webView: WKWebView, service: ServiceID, quality: String) {
-        webView.evaluateJavaScript(VideoDownloader.videoExtractorScript) { [weak self] result, error in
-            guard let self = self else { return }
-            
-            if let dict = result as? [String: Any], let videoUrlStr = dict["url"] as? String, let videoUrl = URL(string: videoUrlStr) {
-                self.startDownload(url: videoUrl, service: service, quality: quality)
-            } else {
-                DispatchQueue.main.async {
-                    let alert = NSAlert()
-                    alert.messageText = "Download Video"
-                    alert.informativeText = "Could not detect a direct video stream on screen.\nMake sure the video is playing before downloading."
-                    alert.alertStyle = .informational
-                    alert.addButton(withTitle: "OK")
-                    alert.runModal()
-                }
+        
+        webView.evaluateJavaScript(script) { result, error in
+            if let error = error {
+                NSLog("[VideoDownloader] JavaScript evaluation error: %@", error.localizedDescription)
             }
         }
     }
     
-    private func startDownload(url: URL, service: ServiceID, quality: String) {
-        var request = URLRequest(url: url)
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
-        request.setValue(service.url.absoluteString, forHTTPHeaderField: "Referer")
-        
-        let task = downloadSession.downloadTask(with: request)
-        activeTasks[task.taskIdentifier] = (service: service, quality: quality)
-        task.resume()
-        
-        DispatchQueue.main.async {
-            self.showNotification(
-                title: "Downloading \(service.name) Video...",
-                body: "Quality: \(quality). File will be saved to your Downloads folder."
-            )
-        }
-    }
-    
-    public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        let taskInfo = activeTasks[downloadTask.taskIdentifier]
-        let serviceName = taskInfo?.service.name ?? "SocialMedia"
-        
+    private func saveVideoData(_ data: Data, serviceName: String) {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyyMMdd_HHmmss"
         let timestamp = dateFormatter.string(from: Date())
@@ -107,29 +116,28 @@ public class VideoDownloader: NSObject, URLSessionDownloadDelegate {
         let destinationURL = downloadsDirectory.appendingPathComponent(filename)
         
         do {
-            if FileManager.default.fileExists(atPath: destinationURL.path) {
-                try FileManager.default.removeItem(at: destinationURL)
-            }
-            try FileManager.default.moveItem(at: location, to: destinationURL)
-            
+            try data.write(to: destinationURL)
             DispatchQueue.main.async {
                 self.showNotification(
-                    title: "🎬 \(serviceName) Video Saved!",
+                    title: "🎬 \(serviceName) Video Downloaded!",
                     body: "Saved as \(filename) in ~/Downloads"
                 )
             }
         } catch {
-            NSLog("[VideoDownloader] Failed to save downloaded video: %@", error.localizedDescription)
+            NSLog("[VideoDownloader] Failed to write data: %@", error.localizedDescription)
+            DispatchQueue.main.async {
+                self.showErrorAlert(message: "Failed to save file: \(error.localizedDescription)")
+            }
         }
-        
-        activeTasks.removeValue(forKey: downloadTask.taskIdentifier)
     }
     
-    public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error = error {
-            NSLog("[VideoDownloader] Download task failed: %@", error.localizedDescription)
-        }
-        activeTasks.removeValue(forKey: task.taskIdentifier)
+    private func showErrorAlert(message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Download Video"
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
     
     private func showNotification(title: String, body: String) {
@@ -149,5 +157,36 @@ public class VideoDownloader: NSObject, URLSessionDownloadDelegate {
     public func openDownloadsFolder() {
         let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
         NSWorkspace.shared.open(downloadsURL)
+    }
+    
+    public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        let taskInfo = activeTasks[downloadTask.taskIdentifier]
+        let serviceName = taskInfo?.service.name ?? "Video"
+        
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyyMMdd_HHmmss"
+        let timestamp = dateFormatter.string(from: Date())
+        
+        let filename = "\(serviceName)_\(timestamp).mp4"
+        let downloadsDirectory = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+        let destinationURL = downloadsDirectory.appendingPathComponent(filename)
+        
+        do {
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                try FileManager.default.removeItem(at: destinationURL)
+            }
+            try FileManager.default.moveItem(at: location, to: destinationURL)
+            
+            DispatchQueue.main.async {
+                self.showNotification(
+                    title: "🎬 \(serviceName) Video Downloaded!",
+                    body: "Saved as \(filename) in ~/Downloads"
+                )
+            }
+        } catch {
+            NSLog("[VideoDownloader] Failed to save downloaded video: %@", error.localizedDescription)
+        }
+        
+        activeTasks.removeValue(forKey: downloadTask.taskIdentifier)
     }
 }
