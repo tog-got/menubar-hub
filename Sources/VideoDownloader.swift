@@ -31,6 +31,15 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
             // 1. If Base64 video data received directly from JS
             if let base64Data = dict["dataBase64"] as? String,
                let data = Data(base64Encoded: base64Data), !data.isEmpty {
+                
+                if isJpegData(data) {
+                    DispatchQueue.main.async {
+                        self.delegate?.didFailDownload(error: "Captured preview image instead of video")
+                        self.showErrorAlert(message: "Detected a thumbnail preview instead of video stream.\nPlease ensure the video is currently playing and try again.")
+                    }
+                    return
+                }
+                
                 saveVideoData(data, serviceName: serviceName)
                 return
             }
@@ -50,6 +59,12 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 }
             }
         }
+    }
+    
+    private func isJpegData(_ data: Data) -> Bool {
+        guard data.count > 3 else { return false }
+        let prefix = data.subdata(in: 0..<3)
+        return prefix == Data([0xFF, 0xD8, 0xFF])
     }
     
     public func downloadVideo(from webView: WKWebView, service: ServiceID, quality: String) {
@@ -78,11 +93,38 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 });
             }
 
+            function isValidVideoUrl(url) {
+                if (!url || typeof url !== 'string' || url.indexOf('http') !== 0) return false;
+                var lower = url.toLowerCase();
+                
+                // Strictly exclude images, thumbnails, and avatars
+                if (lower.indexOf('.jpeg') !== -1 || lower.indexOf('.jpg') !== -1 ||
+                    lower.indexOf('.png') !== -1 || lower.indexOf('.webp') !== -1 ||
+                    lower.indexOf('~tplv') !== -1 || lower.indexOf('/obj/tos-alisg-p-') !== -1 ||
+                    lower.indexOf('/obj/tos-maliva-p-') !== -1 || lower.indexOf('mime=image') !== -1 ||
+                    lower.indexOf('format=jpg') !== -1 || lower.indexOf('avatar') !== -1 ||
+                    lower.indexOf('/image/') !== -1 || lower.indexOf('cover') !== -1) {
+                    return false;
+                }
+                
+                // Must match genuine video stream patterns
+                if (lower.indexOf('.mp4') !== -1 || lower.indexOf('mime_type=video_mp4') !== -1 ||
+                    lower.indexOf('/video/tos/') !== -1 || lower.indexOf('video_id=') !== -1 ||
+                    lower.indexOf('&bytestart=') !== -1 || lower.indexOf('mime=video') !== -1 ||
+                    lower.indexOf('/play/') !== -1 || (lower.indexOf('cdninstagram.com') !== -1 && lower.indexOf('&efg=') !== -1) ||
+                    (lower.indexOf('tiktokcdn.com') !== -1 && lower.indexOf('/video/') !== -1) ||
+                    (lower.indexOf('byteoversea.com') !== -1 && lower.indexOf('/video/') !== -1) ||
+                    (lower.indexOf('ibytedtos.com') !== -1 && lower.indexOf('/video/') !== -1)) {
+                    return true;
+                }
+                return false;
+            }
+
             var results = [];
             var vpCenterY = window.innerHeight / 2;
             var allVideos = Array.from(document.querySelectorAll('video'));
 
-            // 1. Sort video elements: playing first, then closest to center of screen
+            // 1. Prioritize currently playing video in viewport
             var sortedVideos = allVideos.sort(function(a, b) {
                 var aPlaying = (!a.paused && a.currentTime > 0) ? 1 : 0;
                 var bPlaying = (!b.paused && b.currentTime > 0) ? 1 : 0;
@@ -95,7 +137,7 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 return distA - distB;
             });
 
-            // 2. Extract directly from sorted video elements
+            // 2. Extract strictly valid video URLs from sorted video tags
             for (var i = 0; i < sortedVideos.length; i++) {
                 var v = sortedVideos[i];
                 var s = v.currentSrc || v.src;
@@ -106,16 +148,27 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 if (!s || s.indexOf('blob:') === 0) {
                     s = v.getAttribute('src') || v.getAttribute('data-src');
                 }
-                if (s && s.indexOf('http') === 0 && s.indexOf('blob:') !== 0) {
+                if (isValidVideoUrl(s)) {
                     results.push(s);
                 }
             }
 
-            // 3. Safe non-circular search in React Fiber props of active video & parent elements
+            // 3. Performance network entries (filtered strictly for video streams)
+            try {
+                var entries = window.performance.getEntriesByType('resource') || [];
+                for (var j = entries.length - 1; j >= 0; j--) {
+                    var name = entries[j].name || '';
+                    if (isValidVideoUrl(name)) {
+                        results.push(name);
+                    }
+                }
+            } catch(e) {}
+
+            // 4. Safe React property scan for active video container
             if (sortedVideos.length > 0) {
                 var el = sortedVideos[0];
                 var count = 0;
-                while (el && el !== document.body && count < 8) {
+                while (el && el !== document.body && count < 6) {
                     count++;
                     for (var key in el) {
                         if (key.indexOf('__react') === 0) {
@@ -128,7 +181,7 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                                         var p = propKeys[k];
                                         if (typeof obj[p] === 'string') {
                                             var str = obj[p];
-                                            if (str.indexOf('http') === 0 && (str.indexOf('.mp4') !== -1 || str.indexOf('byteoversea') !== -1 || str.indexOf('tiktokcdn') !== -1 || str.indexOf('cdninstagram') !== -1 || str.indexOf('fbcdn') !== -1 || str.indexOf('ibytedtos') !== -1)) {
+                                            if (isValidVideoUrl(str)) {
                                                 results.push(str.replace(/\\\\u0026/g, '&').replace(/\\\\/g, ''));
                                             }
                                         } else if (typeof obj[p] === 'object' && obj[p] !== null && !Array.isArray(obj[p])) {
@@ -144,36 +197,19 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 }
             }
 
-            // 4. Performance resource entries (most recent network requests)
-            try {
-                var entries = window.performance.getEntriesByType('resource') || [];
-                for (var j = entries.length - 1; j >= 0; j--) {
-                    var name = entries[j].name || '';
-                    if (name.indexOf('http') === 0 && (name.indexOf('.mp4') !== -1 || name.indexOf('mime_type=video_mp4') !== -1 || name.indexOf('tiktokcdn') !== -1 || name.indexOf('byteoversea') !== -1 || name.indexOf('cdninstagram') !== -1 || name.indexOf('fbcdn.net') !== -1 || name.indexOf('twimg.com') !== -1)) {
-                        results.push(name);
-                    }
-                }
-            } catch(e) {}
-
-            // 5. Meta tags
-            try {
-                var meta = document.querySelector('meta[property="og:video"], meta[property="og:video:secure_url"]');
-                if (meta && meta.content && meta.content.indexOf('http') === 0) results.push(meta.content);
-            } catch(e) {}
-
             // Deduplicate candidates
             var uniqueList = results.filter(function(item, pos, self) {
                 return self.indexOf(item) === pos;
             });
 
             if (uniqueList.length === 0) {
-                postError("No active video stream detected.\\nPlease start playing the video on screen, then try again.");
+                postError("No active video stream detected.\\nPlease play the video on screen, then click Download.");
                 return;
             }
 
             var chosenUrl = uniqueList[0];
 
-            // Dispatch download: attempt in-browser blob fetch first, fallback to native Swift URLSession
+            // Attempt in-browser blob fetch first, fallback to native Swift URLSession
             fetch(chosenUrl, { credentials: 'include' })
                 .then(function(res) {
                     if (!res.ok) throw new Error("HTTP error " + res.status);
@@ -183,7 +219,7 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                     var reader = new FileReader();
                     reader.onloadend = function() {
                         var base64 = reader.result.split(',')[1];
-                        if (base64 && base64.length > 500) {
+                        if (base64 && base64.length > 1000) {
                             postSuccessData(base64);
                         } else {
                             postDirectUrl(chosenUrl);
