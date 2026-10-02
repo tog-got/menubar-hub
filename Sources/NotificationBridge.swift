@@ -124,7 +124,93 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
 
             // Auto-Scroll Engine for TikTok & Instagram Reels
             window.__menubarHubAutoScrollEnabled = true;
+            window.__menubarHubMediaHistory = window.__menubarHubMediaHistory || [];
             var lastScrollTimestamp = 0;
+
+            // Media & Network Sniffer for Video Downloader
+            try {
+                var origPlay = HTMLMediaElement.prototype.play;
+                HTMLMediaElement.prototype.play = function() {
+                    this.__menubarHubLastPlayed = Date.now();
+                    var s = this.currentSrc || this.src;
+                    if (s && s.indexOf('blob:') !== 0 && s.indexOf('data:') !== 0) {
+                        window.__menubarHubMediaHistory.push({
+                            url: s,
+                            time: Date.now(),
+                            type: 'play'
+                        });
+                        if (window.__menubarHubMediaHistory.length > 60) {
+                            window.__menubarHubMediaHistory.shift();
+                        }
+                    }
+                    return origPlay.apply(this, arguments);
+                };
+            } catch(e) {}
+
+            try {
+                var origFetch = window.fetch;
+                window.fetch = function(input, init) {
+                    try {
+                        var url = (typeof input === 'string') ? input : (input && input.url);
+                        if (url && typeof url === 'string') {
+                            var low = url.toLowerCase();
+                            if ((low.indexOf('.mp4') !== -1 || low.indexOf('video_id=') !== -1 || low.indexOf('mime_type=video_mp4') !== -1 ||
+                                 low.indexOf('/video/tos/') !== -1 || low.indexOf('tiktokcdn.com') !== -1 || low.indexOf('byteoversea.com') !== -1 ||
+                                 low.indexOf('ibytedtos.com') !== -1 || low.indexOf('cdninstagram.com') !== -1 || low.indexOf('twimg.com/ext_tw_video') !== -1 ||
+                                 low.indexOf('fbcdn.net') !== -1) &&
+                                low.indexOf('.jpg') === -1 && low.indexOf('.jpeg') === -1 && low.indexOf('.png') === -1 && low.indexOf('.webp') === -1) {
+                                
+                                var vId = null;
+                                var m = url.match(/\\/video\\/(\\d{15,25})/);
+                                if (m) vId = m[1];
+                                
+                                window.__menubarHubMediaHistory.push({
+                                    url: url,
+                                    videoId: vId,
+                                    time: Date.now(),
+                                    type: 'fetch'
+                                });
+                                if (window.__menubarHubMediaHistory.length > 60) {
+                                    window.__menubarHubMediaHistory.shift();
+                                }
+                            }
+                        }
+                    } catch(e) {}
+                    return origFetch.apply(this, arguments);
+                };
+            } catch(e) {}
+
+            try {
+                var origXhrOpen = XMLHttpRequest.prototype.open;
+                XMLHttpRequest.prototype.open = function(method, url) {
+                    try {
+                        if (url && typeof url === 'string') {
+                            var low = url.toLowerCase();
+                            if ((low.indexOf('.mp4') !== -1 || low.indexOf('video_id=') !== -1 || low.indexOf('mime_type=video_mp4') !== -1 ||
+                                 low.indexOf('/video/tos/') !== -1 || low.indexOf('tiktokcdn.com') !== -1 || low.indexOf('byteoversea.com') !== -1 ||
+                                 low.indexOf('ibytedtos.com') !== -1 || low.indexOf('cdninstagram.com') !== -1 || low.indexOf('twimg.com/ext_tw_video') !== -1 ||
+                                 low.indexOf('fbcdn.net') !== -1) &&
+                                low.indexOf('.jpg') === -1 && low.indexOf('.jpeg') === -1 && low.indexOf('.png') === -1 && low.indexOf('.webp') === -1) {
+                                
+                                var vId = null;
+                                var m = url.match(/\\/video\\/(\\d{15,25})/);
+                                if (m) vId = m[1];
+                                
+                                window.__menubarHubMediaHistory.push({
+                                    url: url,
+                                    videoId: vId,
+                                    time: Date.now(),
+                                    type: 'xhr'
+                                });
+                                if (window.__menubarHubMediaHistory.length > 60) {
+                                    window.__menubarHubMediaHistory.shift();
+                                }
+                            }
+                        }
+                    } catch(e) {}
+                    return origXhrOpen.apply(this, arguments);
+                };
+            } catch(e) {}
 
             function advanceToNextVideo() {
                 if (!window.__menubarHubAutoScrollEnabled) return;
