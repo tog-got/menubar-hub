@@ -78,90 +78,125 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 });
             }
 
-            // Step 1: Find the EXACT video currently visible and playing in the user viewport
-            var allVideos = Array.from(document.querySelectorAll('video'));
+            // --- STEP 1: Pinpoint the EXACT Container in Viewport Center ---
             var vpCenterY = window.innerHeight / 2;
-
-            // Prioritize playing videos
-            var activeVideo = allVideos.find(function(v) { return !v.paused && v.currentTime > 0; });
-
-            // If none playing, pick the video closest to the center of the viewport
-            if (!activeVideo && allVideos.length > 0) {
-                activeVideo = allVideos.sort(function(a, b) {
-                    var rA = a.getBoundingClientRect();
-                    var rB = b.getBoundingClientRect();
-                    var distA = Math.abs((rA.top + rA.height / 2) - vpCenterY);
-                    var distB = Math.abs((rB.top + rB.height / 2) - vpCenterY);
-                    return distA - distB;
-                })[0];
-            }
-
-            var chosenUrl = null;
-
-            // Step 2: Extract currentSrc / src directly from this exact active video
-            if (activeVideo) {
-                var s = activeVideo.currentSrc || activeVideo.src;
-                if (!s) {
-                    var srcEl = activeVideo.querySelector('source');
-                    if (srcEl) s = srcEl.src;
-                }
-                if (!s) s = activeVideo.getAttribute('src') || activeVideo.getAttribute('data-src');
-                if (s && s.indexOf('http') === 0) {
-                    chosenUrl = s;
-                }
-            }
-
-            // Step 3: If activeVideo has a blob URL or empty src, check its direct parent item container (TikTok / IG / FB)
-            if (!chosenUrl && activeVideo) {
-                var itemContainer = activeVideo.closest('[data-e2e="recommend-list-item-container"]') ||
-                                    activeVideo.closest('article') ||
-                                    activeVideo.closest('[data-e2e="feed-video"]') ||
-                                    activeVideo.parentElement;
-                if (itemContainer) {
-                    var links = itemContainer.querySelectorAll('a, source, link');
-                    for (var i = 0; i < links.length; i++) {
-                        var h = links[i].href || links[i].src;
-                        if (h && (h.indexOf('.mp4') !== -1 || h.indexOf('mime_type=video_mp4') !== -1 || h.indexOf('tiktokcdn') !== -1 || h.indexOf('cdninstagram') !== -1)) {
-                            chosenUrl = h;
-                            break;
-                        }
-                    }
+            
+            // Candidate containers per platform
+            var containerSelectors = [
+                '[data-e2e="recommend-list-item-container"]',
+                '[class*="DivItemContainerV2"]',
+                '[class*="DivVideoWrapper"]',
+                'article',
+                'div[role="dialog"]',
+                'div[data-e2e="feed-video"]',
+                'div[data-e2e="search-card-video"]',
+                'div[tabindex="-1"]'
+            ];
+            
+            var containers = Array.from(document.querySelectorAll(containerSelectors.join(',')));
+            var activeContainer = null;
+            
+            if (containers.length > 0) {
+                // Find container spanning across viewport center
+                activeContainer = containers.find(function(c) {
+                    var r = c.getBoundingClientRect();
+                    return r.top <= vpCenterY && r.bottom >= vpCenterY;
+                });
+                
+                // Fallback: pick the one with largest visible area
+                if (!activeContainer) {
+                    activeContainer = containers.sort(function(a, b) {
+                        var rA = a.getBoundingClientRect();
+                        var rB = b.getBoundingClientRect();
+                        var hA = Math.max(0, Math.min(rA.bottom, window.innerHeight) - Math.max(rA.top, 0));
+                        var hB = Math.max(0, Math.min(rB.bottom, window.innerHeight) - Math.max(rB.top, 0));
+                        return hB - hA;
+                    })[0];
                 }
             }
 
-            // Step 4: Check recent media sniffer list (find the most recent stream)
-            if (!chosenUrl && window.__menubarHubDetectedVideos && window.__menubarHubDetectedVideos.length > 0) {
-                chosenUrl = window.__menubarHubDetectedVideos[0].url;
+            // Find the video element strictly inside the active container first
+            var targetVideo = activeContainer ? activeContainer.querySelector('video') : null;
+            
+            // Fallback: check globally playing video
+            if (!targetVideo) {
+                var allVideos = Array.from(document.querySelectorAll('video'));
+                targetVideo = allVideos.find(function(v) { return !v.paused && v.currentTime > 0; });
+                if (!targetVideo && allVideos.length > 0) {
+                    targetVideo = allVideos.sort(function(a, b) {
+                        var rA = a.getBoundingClientRect();
+                        var rB = b.getBoundingClientRect();
+                        return Math.abs((rA.top + rA.height / 2) - vpCenterY) - Math.abs((rB.top + rB.height / 2) - vpCenterY);
+                    })[0];
+                }
             }
 
-            // Step 5: Check performance network entries
-            if (!chosenUrl) {
-                try {
-                    var entries = window.performance.getEntriesByType('resource') || [];
-                    for (var j = entries.length - 1; j >= 0; j--) {
-                        var name = entries[j].name || '';
-                        if (name.indexOf('http') === 0) {
-                            if (name.indexOf('.mp4') !== -1 ||
-                                name.indexOf('mime_type=video_mp4') !== -1 ||
-                                name.indexOf('tiktokcdn') !== -1 ||
-                                name.indexOf('byteoversea') !== -1 ||
-                                name.indexOf('cdninstagram') !== -1 ||
-                                name.indexOf('fbcdn.net') !== -1) {
-                                chosenUrl = name;
-                                break;
-                            }
-                        }
-                    }
-                } catch(e) {}
-            }
-
-            if (!chosenUrl) {
-                postError("No active video found on screen.\\nPlease make sure the video is playing, then try again.");
+            if (!targetVideo && !activeContainer) {
+                postError("No active video found on screen.\\nPlease play the video first.");
                 return;
             }
 
+            var exactUrl = null;
+
+            // --- STEP 2: Extract from React Props of the Active Element (TikTok & Meta) ---
+            function extractUrlFromReact(el) {
+                if (!el) return null;
+                var keys = Object.keys(el);
+                for (var i = 0; i < keys.length; i++) {
+                    if (keys[i].startsWith('__reactProps') || keys[i].startsWith('__reactFiber')) {
+                        try {
+                            var json = JSON.stringify(el[keys[i]]);
+                            if (json) {
+                                // Match direct MP4 / CDN video URLs
+                                var matches = json.match(/https:\\/\\/[^"\\s]+\\.(?:mp4|byteoversea|ibytedtos|tiktokcdn|cdninstagram|fbcdn)[^"\\s]*/g);
+                                if (matches && matches.length > 0) {
+                                    return matches[0].replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
+                                }
+                            }
+                        } catch(e) {}
+                    }
+                }
+                return null;
+            }
+
+            if (targetVideo) exactUrl = extractUrlFromReact(targetVideo);
+            if (!exactUrl && activeContainer) exactUrl = extractUrlFromReact(activeContainer);
+
+            // --- STEP 3: Extract from Video Element DOM Attributes ---
+            if (!exactUrl && targetVideo) {
+                var vSrc = targetVideo.currentSrc || targetVideo.src;
+                if (!vSrc || vSrc.indexOf('blob:') === 0) {
+                    var source = targetVideo.querySelector('source');
+                    if (source) vSrc = source.src;
+                }
+                if (!vSrc || vSrc.indexOf('blob:') === 0) {
+                    vSrc = targetVideo.getAttribute('src') || targetVideo.getAttribute('data-src');
+                }
+                if (vSrc && vSrc.indexOf('http') === 0) {
+                    exactUrl = vSrc;
+                }
+            }
+
+            // --- STEP 4: Fallback to Container Links ---
+            if (!exactUrl && activeContainer) {
+                var sources = activeContainer.querySelectorAll('source, a[href*=".mp4"]');
+                for (var k = 0; k < sources.length; k++) {
+                    var h = sources[k].src || sources[k].href;
+                    if (h && h.indexOf('http') === 0) {
+                        exactUrl = h;
+                        break;
+                    }
+                }
+            }
+
+            if (!exactUrl) {
+                postError("Could not retrieve video stream URL.\\nPlease ensure the video is currently playing.");
+                return;
+            }
+
+            // --- STEP 5: Dispatch Download ---
             // Attempt in-browser blob fetch first, fallback to native Swift URLSession
-            fetch(chosenUrl, { credentials: 'include' })
+            fetch(exactUrl, { credentials: 'include' })
                 .then(function(res) {
                     if (!res.ok) throw new Error("HTTP error " + res.status);
                     return res.blob();
@@ -173,13 +208,13 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                         if (base64 && base64.length > 500) {
                             postSuccessData(base64);
                         } else {
-                            postDirectUrl(chosenUrl);
+                            postDirectUrl(exactUrl);
                         }
                     };
                     reader.readAsDataURL(blob);
                 })
                 .catch(function(err) {
-                    postDirectUrl(chosenUrl);
+                    postDirectUrl(exactUrl);
                 });
         })();
         """
@@ -245,7 +280,6 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
         }
     }
     
-    // Track download progress in real-time
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         if totalBytesExpectedToWrite > 0 {
             let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
