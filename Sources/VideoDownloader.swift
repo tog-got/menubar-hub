@@ -72,42 +72,16 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
 
             var candidates = [];
 
-            // Strategy 1: Search in-page hydration state (TikTok / IG / Threads JSON state)
-            try {
-                // TikTok state scripts
-                var tiktokScript = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__') || document.getElementById('SIGI_STATE');
-                if (tiktokScript && tiktokScript.textContent) {
-                    var data = JSON.parse(tiktokScript.textContent);
-                    var str = JSON.stringify(data);
-                    var matches = str.match(/https:\\/\\/[^"\\s]+\\.(?:mp4|byteoversea|ibytedtos|tiktokcdn)[^"\\s]*/g);
-                    if (matches) {
-                        matches.forEach(function(m) {
-                            var cleanUrl = m.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
-                            candidates.push(cleanUrl);
-                        });
-                    }
-                }
-            } catch(e) {}
-
-            try {
-                // Instagram & Threads script tags
-                var jsonScripts = document.querySelectorAll('script[type="application/json"]');
-                jsonScripts.forEach(function(s) {
-                    if (!s.textContent) return;
-                    var text = s.textContent;
-                    if (text.indexOf('video_versions') !== -1 || text.indexOf('browser_native_hd_url') !== -1 || text.indexOf('cdninstagram') !== -1 || text.indexOf('fbcdn.net') !== -1) {
-                        var matches = text.match(/https:\\/\\/[^"\\s]+(?:cdninstagram\\.com|fbcdn\\.net)[^"\\s]+(?:\\.mp4|\\?bytestart=[^"\\s]+)/g);
-                        if (matches) {
-                            matches.forEach(function(m) {
-                                var cleanUrl = m.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
-                                candidates.push(cleanUrl);
-                            });
-                        }
+            // 1. Check live media sniffer array (Max Video Downloader stream buffer)
+            if (window.__menubarHubDetectedVideos && window.__menubarHubDetectedVideos.length > 0) {
+                window.__menubarHubDetectedVideos.forEach(function(item) {
+                    if (item.url && item.url.indexOf('http') === 0) {
+                        candidates.push(item.url);
                     }
                 });
-            } catch(e) {}
+            }
 
-            // Strategy 2: Deep search all video elements across DOM & shadow roots
+            // 2. Scan all video elements on the page (including shadow roots)
             function findVideos(root) {
                 var list = [];
                 try {
@@ -137,7 +111,7 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 }
             });
 
-            // Strategy 3: Scan performance resource entries for video CDN domains
+            // 3. Scan performance network resource entries
             try {
                 var entries = window.performance.getEntriesByType('resource') || [];
                 for (var i = entries.length - 1; i >= 0; i--) {
@@ -159,12 +133,37 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 }
             } catch(e) {}
 
-            // Strategy 4: Check OpenGraph / Twitter meta tags
+            // 4. Scan in-page hydration state (TikTok / IG / Threads JSON state)
             try {
-                var meta = document.querySelector('meta[property="og:video"], meta[property="og:video:secure_url"], meta[name="twitter:player:stream"]');
-                if (meta && meta.content && meta.content.indexOf('http') === 0) {
-                    candidates.push(meta.content);
+                var tiktokScript = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__') || document.getElementById('SIGI_STATE');
+                if (tiktokScript && tiktokScript.textContent) {
+                    var data = JSON.parse(tiktokScript.textContent);
+                    var str = JSON.stringify(data);
+                    var matches = str.match(/https:\\/\\/[^"\\s]+\\.(?:mp4|byteoversea|ibytedtos|tiktokcdn)[^"\\s]*/g);
+                    if (matches) {
+                        matches.forEach(function(m) {
+                            var cleanUrl = m.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
+                            candidates.push(cleanUrl);
+                        });
+                    }
                 }
+            } catch(e) {}
+
+            try {
+                var jsonScripts = document.querySelectorAll('script[type="application/json"]');
+                jsonScripts.forEach(function(s) {
+                    if (!s.textContent) return;
+                    var text = s.textContent;
+                    if (text.indexOf('video_versions') !== -1 || text.indexOf('browser_native_hd_url') !== -1 || text.indexOf('cdninstagram') !== -1 || text.indexOf('fbcdn.net') !== -1) {
+                        var matches = text.match(/https:\\/\\/[^"\\s]+(?:cdninstagram\\.com|fbcdn\\.net)[^"\\s]+(?:\\.mp4|\\?bytestart=[^"\\s]+)/g);
+                        if (matches) {
+                            matches.forEach(function(m) {
+                                var cleanUrl = m.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
+                                candidates.push(cleanUrl);
+                            });
+                        }
+                    }
+                });
             } catch(e) {}
 
             // Remove duplicates
@@ -174,7 +173,7 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
             });
 
             if (uniqueCandidates.length === 0) {
-                postError("No downloadable video found on screen.\\nPlease click play on the video first, then click Download.");
+                postError("No downloadable video detected yet.\\nPlay a video on screen for a moment, then click Download.");
                 return;
             }
 
@@ -212,19 +211,28 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
     }
     
     private func startDownload(url: URL, serviceName: String, quality: String) {
-        var request = URLRequest(url: url)
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
-        request.setValue("*/*", forHTTPHeaderField: "Accept")
-        
-        let task = downloadSession.downloadTask(with: request)
-        activeTasks[task.taskIdentifier] = (serviceName: serviceName, quality: quality)
-        task.resume()
-        
-        DispatchQueue.main.async {
-            self.showNotification(
-                title: "Downloading \(serviceName) Video...",
-                body: "Quality: \(quality). File will be saved to your Downloads folder."
-            )
+        WKWebsiteDataStore.default().httpCookieStore.getAllCookies { [weak self] cookies in
+            guard let self = self else { return }
+            
+            var request = URLRequest(url: url)
+            let headerFields = HTTPCookie.requestHeaderFields(with: cookies)
+            for (key, val) in headerFields {
+                request.setValue(val, forHTTPHeaderField: key)
+            }
+            request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+            request.setValue("*/*", forHTTPHeaderField: "Accept")
+            request.setValue("https://www.google.com", forHTTPHeaderField: "Referer")
+            
+            let task = self.downloadSession.downloadTask(with: request)
+            self.activeTasks[task.taskIdentifier] = (serviceName: serviceName, quality: quality)
+            task.resume()
+            
+            DispatchQueue.main.async {
+                self.showNotification(
+                    title: "Downloading \(serviceName) Video...",
+                    body: "Quality: \(quality). File will be saved to your Downloads folder."
+                )
+            }
         }
     }
     

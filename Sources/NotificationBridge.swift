@@ -122,7 +122,67 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
                 observer.observe(target, { subtree: true, characterData: true, childList: true });
             }
 
-            // Enhanced Auto-Scroll Engine for TikTok & Instagram Reels
+            // Universal Media Sniffer (Max Video Downloader Engine)
+            window.__menubarHubDetectedVideos = window.__menubarHubDetectedVideos || [];
+
+            function registerVideo(url, label) {
+                if (!url || typeof url !== 'string' || url.indexOf('http') !== 0) return;
+                var cleanUrl = url.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
+                for (var i = 0; i < window.__menubarHubDetectedVideos.length; i++) {
+                    if (window.__menubarHubDetectedVideos[i].url === cleanUrl) return;
+                }
+                window.__menubarHubDetectedVideos.unshift({
+                    url: cleanUrl,
+                    title: document.title || "Video",
+                    quality: label || "HD 1080p",
+                    time: Date.now()
+                });
+                if (window.__menubarHubDetectedVideos.length > 25) window.__menubarHubDetectedVideos.pop();
+            }
+
+            // 1. Hook HTMLMediaElement play & src
+            try {
+                var origPlay = HTMLMediaElement.prototype.play;
+                HTMLMediaElement.prototype.play = function() {
+                    var s = this.currentSrc || this.src;
+                    if (s && s.indexOf('http') === 0) {
+                        var q = (this.videoHeight && this.videoHeight >= 1080) ? "1080p HD" : ((this.videoHeight && this.videoHeight >= 720) ? "720p HD" : "HD Original");
+                        registerVideo(s, q);
+                    }
+                    return origPlay.apply(this, arguments);
+                };
+            } catch(e) {}
+
+            // 2. Hook Fetch requests for TikTok, Instagram, FB, Threads, X CDN links
+            try {
+                var origFetch = window.fetch;
+                window.fetch = function() {
+                    var url = (typeof arguments[0] === 'string') ? arguments[0] : (arguments[0] && arguments[0].url);
+                    if (url && typeof url === 'string') {
+                        if (url.includes('.mp4') || url.includes('mime_type=video_mp4') || url.includes('video_id=') ||
+                            url.includes('tiktokcdn.com') || url.includes('cdninstagram.com') || url.includes('fbcdn.net') ||
+                            url.includes('byteoversea.com') || url.includes('ibytedtos.com') || url.includes('twimg.com')) {
+                            registerVideo(url, "1080p HD");
+                        }
+                    }
+                    return origFetch.apply(this, arguments);
+                };
+            } catch(e) {}
+
+            // 3. Hook XMLHttpRequest
+            try {
+                var origOpen = XMLHttpRequest.prototype.open;
+                XMLHttpRequest.prototype.open = function(method, url) {
+                    if (url && typeof url === 'string') {
+                        if (url.includes('.mp4') || url.includes('mime_type=video_mp4') || url.includes('tiktokcdn.com') || url.includes('cdninstagram.com') || url.includes('fbcdn.net')) {
+                            registerVideo(url, "1080p HD");
+                        }
+                    }
+                    return origOpen.apply(this, arguments);
+                };
+            } catch(e) {}
+
+            // Auto-Scroll Engine for TikTok & Instagram Reels
             window.__menubarHubAutoScrollEnabled = true;
             var lastScrollTimestamp = 0;
 
@@ -132,7 +192,6 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
                 if (now - lastScrollTimestamp < 2200) return;
                 lastScrollTimestamp = now;
 
-                // 1. Click TikTok/Instagram specific Next buttons
                 var selectors = [
                     'button[data-e2e="arrow-right"]',
                     '[data-e2e="arrow-right"]',
@@ -147,7 +206,6 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
                     'div[role="button"][aria-label="Berikutnya"]'
                 ];
                 
-                var clicked = false;
                 for (var i = 0; i < selectors.length; i++) {
                     var el = document.querySelector(selectors[i]);
                     if (el) {
@@ -155,13 +213,11 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
                             el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
                             el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
                             el.click();
-                            clicked = true;
                             break;
                         } catch(e) {}
                     }
                 }
 
-                // 2. Synthesize ArrowDown keyboard events (TikTok & IG desktop feed listeners)
                 var targets = [document.activeElement, document.body, document.documentElement, window];
                 targets.forEach(function(t) {
                     if (!t) return;
@@ -187,7 +243,6 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
                     } catch(e) {}
                 });
 
-                // 3. Wheel event (Simulate mouse trackpad scroll)
                 try {
                     var wheelEv = new WheelEvent('wheel', {
                         deltaY: 800,
@@ -199,7 +254,6 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
                     window.dispatchEvent(wheelEv);
                 } catch(e) {}
 
-                // 4. Scroll containers
                 var containers = [
                     document.querySelector('[data-e2e="recommend-list-item-container"]'),
                     document.querySelector('[data-e2e="feed-container"]'),
@@ -218,28 +272,29 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
             function setupVideoListeners() {
                 var videos = document.querySelectorAll('video');
                 videos.forEach(function(video) {
+                    var s = video.currentSrc || video.src;
+                    if (s && s.indexOf('http') === 0) {
+                        registerVideo(s, (video.videoHeight && video.videoHeight >= 1080) ? "1080p HD" : "720p HD");
+                    }
+
                     if (video.__menubarHubAttached) return;
                     video.__menubarHubAttached = true;
 
                     var lastTime = 0;
 
-                    // Ended event
                     video.addEventListener('ended', function() {
                         advanceToNextVideo();
                     });
 
-                    // Continuous monitoring for loop playback
                     video.addEventListener('timeupdate', function() {
                         if (!window.__menubarHubAutoScrollEnabled) return;
                         var cur = video.currentTime;
                         var dur = video.duration;
                         
                         if (dur && dur > 1.2) {
-                            // Video nearing end (within 0.35 seconds)
                             if (cur >= dur - 0.35 && cur > 1.0) {
                                 advanceToNextVideo();
                             }
-                            // Video looped from end to beginning
                             if (lastTime > dur - 1.2 && cur < 0.6) {
                                 advanceToNextVideo();
                             }
@@ -249,7 +304,7 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
                 });
             }
 
-            setInterval(setupVideoListeners, 600);
+            setInterval(setupVideoListeners, 700);
         })();
         """
     }
