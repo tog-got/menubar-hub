@@ -70,63 +70,118 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 });
             }
 
-            // Step 1: Scan Performance Resource Timings (Highest fidelity direct CDN MP4 streams)
-            var candidateUrls = [];
+            var candidates = [];
+
+            // Strategy 1: Search in-page hydration state (TikTok / IG / Threads JSON state)
+            try {
+                // TikTok state scripts
+                var tiktokScript = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__') || document.getElementById('SIGI_STATE');
+                if (tiktokScript && tiktokScript.textContent) {
+                    var data = JSON.parse(tiktokScript.textContent);
+                    var str = JSON.stringify(data);
+                    var matches = str.match(/https:\\/\\/[^"\\s]+\\.(?:mp4|byteoversea|ibytedtos|tiktokcdn)[^"\\s]*/g);
+                    if (matches) {
+                        matches.forEach(function(m) {
+                            var cleanUrl = m.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
+                            candidates.push(cleanUrl);
+                        });
+                    }
+                }
+            } catch(e) {}
+
+            try {
+                // Instagram & Threads script tags
+                var jsonScripts = document.querySelectorAll('script[type="application/json"]');
+                jsonScripts.forEach(function(s) {
+                    if (!s.textContent) return;
+                    var text = s.textContent;
+                    if (text.indexOf('video_versions') !== -1 || text.indexOf('browser_native_hd_url') !== -1 || text.indexOf('cdninstagram') !== -1 || text.indexOf('fbcdn.net') !== -1) {
+                        var matches = text.match(/https:\\/\\/[^"\\s]+(?:cdninstagram\\.com|fbcdn\\.net)[^"\\s]+(?:\\.mp4|\\?bytestart=[^"\\s]+)/g);
+                        if (matches) {
+                            matches.forEach(function(m) {
+                                var cleanUrl = m.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
+                                candidates.push(cleanUrl);
+                            });
+                        }
+                    }
+                });
+            } catch(e) {}
+
+            // Strategy 2: Deep search all video elements across DOM & shadow roots
+            function findVideos(root) {
+                var list = [];
+                try {
+                    var vids = root.querySelectorAll('video');
+                    vids.forEach(function(v) { list.push(v); });
+                    
+                    var allElements = root.querySelectorAll('*');
+                    allElements.forEach(function(el) {
+                        if (el.shadowRoot) {
+                            list = list.concat(findVideos(el.shadowRoot));
+                        }
+                    });
+                } catch(e) {}
+                return list;
+            }
+
+            var allVideos = findVideos(document);
+            allVideos.forEach(function(v) {
+                var s = v.currentSrc || v.src;
+                if (!s) {
+                    var source = v.querySelector('source');
+                    if (source) s = source.src;
+                }
+                if (!s) s = v.getAttribute('src') || v.getAttribute('data-src');
+                if (s && s.indexOf('http') === 0) {
+                    candidates.unshift(s);
+                }
+            });
+
+            // Strategy 3: Scan performance resource entries for video CDN domains
             try {
                 var entries = window.performance.getEntriesByType('resource') || [];
                 for (var i = entries.length - 1; i >= 0; i--) {
                     var name = entries[i].name || '';
                     if (name.indexOf('http') === 0) {
                         if (name.indexOf('.mp4') !== -1 ||
-                            name.indexOf('mime=video') !== -1 ||
-                            name.indexOf('video/mp4') !== -1 ||
-                            name.indexOf('cdninstagram.com') !== -1 && name.indexOf('.mp4') !== -1 ||
-                            name.indexOf('tiktokcdn.com') !== -1 && (name.indexOf('.mp4') !== -1 || name.indexOf('/video/') !== -1) ||
-                            name.indexOf('fbcdn.net') !== -1 && name.indexOf('.mp4') !== -1 ||
-                            name.indexOf('twimg.com') !== -1 && name.indexOf('.mp4') !== -1) {
-                            candidateUrls.push(name);
+                            name.indexOf('mime_type=video_mp4') !== -1 ||
+                            name.indexOf('video_id=') !== -1 ||
+                            name.indexOf('tiktokcdn') !== -1 ||
+                            name.indexOf('byteoversea') !== -1 ||
+                            name.indexOf('ibytedtos') !== -1 ||
+                            name.indexOf('pstatp') !== -1 ||
+                            name.indexOf('cdninstagram') !== -1 ||
+                            name.indexOf('fbcdn.net') !== -1 ||
+                            name.indexOf('twimg.com') !== -1) {
+                            candidates.push(name);
                         }
                     }
                 }
             } catch(e) {}
 
-            // Step 2: Scan DOM Video Elements
-            var videos = Array.from(document.querySelectorAll('video'));
-            var activeVideo = videos.find(function(v) { return !v.paused && v.currentTime > 0; });
-            if (!activeVideo && videos.length > 0) {
-                activeVideo = videos.sort(function(a, b) {
-                    var rA = a.getBoundingClientRect();
-                    var rB = b.getBoundingClientRect();
-                    return (rB.width * rB.height) - (rA.width * rA.height);
-                })[0];
-            }
-
-            if (activeVideo) {
-                var vSrc = activeVideo.currentSrc || activeVideo.src;
-                if (!vSrc) {
-                    var s = activeVideo.querySelector('source');
-                    if (s) vSrc = s.src;
+            // Strategy 4: Check OpenGraph / Twitter meta tags
+            try {
+                var meta = document.querySelector('meta[property="og:video"], meta[property="og:video:secure_url"], meta[name="twitter:player:stream"]');
+                if (meta && meta.content && meta.content.indexOf('http') === 0) {
+                    candidates.push(meta.content);
                 }
-                if (vSrc && vSrc.indexOf('http') === 0) {
-                    candidateUrls.unshift(vSrc);
-                }
-            }
+            } catch(e) {}
 
-            // Step 3: Scan Meta tags
-            var metaVideo = document.querySelector('meta[property="og:video"], meta[property="og:video:secure_url"], meta[property="twitter:player:stream"]');
-            if (metaVideo && metaVideo.content && metaVideo.content.indexOf('http') === 0) {
-                candidateUrls.push(metaVideo.content);
-            }
+            // Remove duplicates
+            var uniqueCandidates = [];
+            candidates.forEach(function(u) {
+                if (uniqueCandidates.indexOf(u) === -1) uniqueCandidates.push(u);
+            });
 
-            if (candidateUrls.length === 0) {
-                postError("No downloadable video found. Play a video on screen before downloading.");
+            if (uniqueCandidates.length === 0) {
+                postError("No downloadable video found on screen.\\nPlease click play on the video first, then click Download.");
                 return;
             }
 
-            var bestUrl = candidateUrls[0];
+            var bestUrl = uniqueCandidates[0];
 
-            // Step 4: Attempt in-browser Blob Fetch (for best speed and cookie preservation)
-            fetch(bestUrl, { credentials: 'include', mode: 'cors' })
+            // Attempt in-browser blob fetch first, fallback to native Swift URLSession
+            fetch(bestUrl, { credentials: 'include' })
                 .then(function(res) {
                     if (!res.ok) throw new Error("HTTP error " + res.status);
                     return res.blob();
@@ -135,7 +190,7 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                     var reader = new FileReader();
                     reader.onloadend = function() {
                         var base64 = reader.result.split(',')[1];
-                        if (base64 && base64.length > 100) {
+                        if (base64 && base64.length > 500) {
                             postSuccessData(base64);
                         } else {
                             postDirectUrl(bestUrl);
@@ -144,7 +199,6 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                     reader.readAsDataURL(blob);
                 })
                 .catch(function(err) {
-                    // Fallback to Native URLSession download with direct URL
                     postDirectUrl(bestUrl);
                 });
         })();
