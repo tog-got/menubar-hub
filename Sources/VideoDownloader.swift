@@ -28,15 +28,7 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
             let serviceName = dict["service"] as? String ?? "Video"
             let quality = dict["quality"] as? String ?? "Best"
             
-            // 0. If in-browser progress report
-            if let progressNum = dict["progress"] as? Double {
-                DispatchQueue.main.async {
-                    self.delegate?.didUpdateDownloadProgress(percent: progressNum, serviceName: serviceName)
-                }
-                return
-            }
-            
-            // 1. If Base64 video data received directly from in-browser XHR
+            // 1. If Base64 video data received directly from JS
             if let base64Data = dict["dataBase64"] as? String,
                let data = Data(base64Encoded: base64Data), !data.isEmpty {
                 
@@ -126,87 +118,125 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 return false;
             }
 
-            // 1. Find the video element actively playing in viewport
+            // --- STEP 1: Find Active Playing Video on Screen ---
             var allVideos = Array.from(document.querySelectorAll('video'));
-            var activeVideo = allVideos.find(function(v) { return !v.paused && v.currentTime > 0; });
-            if (!activeVideo && allVideos.length > 0) {
+            var playingVideo = allVideos.find(function(v) { return !v.paused && v.currentTime > 0; });
+            
+            if (!playingVideo && allVideos.length > 0) {
                 var vpCenterY = window.innerHeight / 2;
-                activeVideo = allVideos.sort(function(a, b) {
+                playingVideo = allVideos.sort(function(a, b) {
                     var rA = a.getBoundingClientRect();
                     var rB = b.getBoundingClientRect();
                     return Math.abs((rA.top + rA.height / 2) - vpCenterY) - Math.abs((rB.top + rB.height / 2) - vpCenterY);
                 })[0];
             }
 
-            if (!activeVideo) {
-                postError("No active video found on screen.\\nPlease start playing the video first.");
-                return;
+            // Find container strictly of this specific video
+            var container = playingVideo ? (playingVideo.closest('[data-e2e="recommend-list-item-container"]') ||
+                                           playingVideo.closest('[class*="ItemContainer"]') ||
+                                           playingVideo.closest('article') ||
+                                           playingVideo.parentElement.parentElement) : null;
+            if (!container) {
+                var vpCenterY = window.innerHeight / 2;
+                var centerEl = document.elementFromPoint(window.innerWidth / 2, vpCenterY) || document.body;
+                container = centerEl.closest('[data-e2e="recommend-list-item-container"], [class*="ItemContainer"], article') || centerEl;
             }
 
-            // 2. Extract the video's stream URL
-            var streamUrl = activeVideo.__exactMediaUrl;
-            if (!streamUrl && activeVideo.currentSrc && activeVideo.currentSrc.indexOf('http') === 0 && activeVideo.currentSrc.indexOf('blob:') !== 0) {
-                streamUrl = activeVideo.currentSrc;
+            // --- STEP 2: TikTok Specific - Extract videoId strictly inside active container ---
+            var videoId = null;
+            if (container) {
+                var links = Array.from(container.querySelectorAll('a[href]'));
+                for (var i = 0; i < links.length; i++) {
+                    var m = links[i].href.match(/\\/video\\/(\\d{15,22})/);
+                    if (m) { videoId = m[1]; break; }
+                }
             }
-            if (!streamUrl && activeVideo.src && activeVideo.src.indexOf('http') === 0 && activeVideo.src.indexOf('blob:') !== 0) {
-                streamUrl = activeVideo.src;
+            if (!videoId) {
+                var pageMatch = window.location.pathname.match(/\\/video\\/(\\d{15,22})/);
+                if (pageMatch) videoId = pageMatch[1];
             }
 
-            // If video is loaded via blob, find the matching resource URL from performance entries
-            if (!streamUrl) {
-                var entries = window.performance.getEntriesByType('resource') || [];
-                for (var j = entries.length - 1; j >= 0; j--) {
-                    var name = entries[j].name || '';
-                    if (isValidVideoUrl(name)) {
-                        streamUrl = name;
-                        break;
+            function finishWithUrl(url) {
+                if (!url) {
+                    postError("Could not retrieve video stream. Please ensure the video is playing.");
+                    return;
+                }
+                var cleanUrl = url.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
+                
+                fetch(cleanUrl, { credentials: 'include' })
+                    .then(function(res) {
+                        if (!res.ok) throw new Error("Fetch failed");
+                        return res.blob();
+                    })
+                    .then(function(blob) {
+                        var reader = new FileReader();
+                        reader.onloadend = function() {
+                            var base64 = reader.result.split(',')[1];
+                            if (base64 && base64.length > 1000) {
+                                postSuccessData(base64);
+                            } else {
+                                postDirectUrl(cleanUrl);
+                            }
+                        };
+                        reader.readAsDataURL(blob);
+                    })
+                    .catch(function(err) {
+                        postDirectUrl(cleanUrl);
+                    });
+            }
+
+            // Look up video in TikTok's JSON state for this specific videoId
+            if (service === "TikTok" && videoId) {
+                // 1. Check in-memory item module
+                try {
+                    var sEl = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
+                    if (sEl && sEl.textContent) {
+                        var parsed = JSON.parse(sEl.textContent);
+                        var itemMod = (parsed.__DEFAULT_SCOPE__ && parsed.__DEFAULT_SCOPE__['webapp.app-context'] && parsed.__DEFAULT_SCOPE__['webapp.app-context'].itemModule) ||
+                                      (parsed.defaultScope && parsed.defaultScope['webapp.app-context'] && parsed.defaultScope['webapp.app-context'].itemModule);
+                        if (itemMod && itemMod[videoId] && itemMod[videoId].video) {
+                            var pUrl = itemMod[videoId].video.playAddr || itemMod[videoId].video.downloadAddr;
+                            if (pUrl && isValidVideoUrl(pUrl)) {
+                                finishWithUrl(pUrl);
+                                return;
+                            }
+                        }
+                    }
+                } catch(e) {}
+
+                // 2. Check SIGI_STATE
+                if (window.SIGI_STATE && window.SIGI_STATE.ItemModule && window.SIGI_STATE.ItemModule[videoId]) {
+                    var sigiItem = window.SIGI_STATE.ItemModule[videoId];
+                    if (sigiItem.video && (sigiItem.video.playAddr || sigiItem.video.downloadAddr)) {
+                        var sUrl = sigiItem.video.playAddr || sigiItem.video.downloadAddr;
+                        if (isValidVideoUrl(sUrl)) {
+                            finishWithUrl(sUrl);
+                            return;
+                        }
                     }
                 }
             }
 
-            if (!streamUrl) {
-                postError("Could not locate video stream. Make sure the video is currently playing.");
-                return;
+            // --- STEP 3: Instagram / Threads / FB / X ---
+            var chosenUrl = null;
+            if (playingVideo) {
+                var s = playingVideo.currentSrc || playingVideo.src;
+                if (!s || s.indexOf('blob:') === 0) {
+                    var srcEl = playingVideo.querySelector('source');
+                    if (srcEl) s = srcEl.src;
+                }
+                if (isValidVideoUrl(s)) chosenUrl = s;
             }
 
-            // 3. Download using in-browser XMLHttpRequest with responseType = 'blob'
-            var xhr = new XMLHttpRequest();
-            xhr.open('GET', streamUrl, true);
-            xhr.responseType = 'blob';
-            
-            xhr.onprogress = function(e) {
-                if (e.lengthComputable && e.total > 0) {
-                    var pct = (e.loaded / e.total) * 100.0;
-                    window.webkit.messageHandlers.videoSaveHandler.postMessage({
-                        progress: pct,
-                        service: service
-                    });
+            if (!chosenUrl && container) {
+                var vidInside = container.querySelector('video');
+                if (vidInside) {
+                    var vs = vidInside.currentSrc || vidInside.src;
+                    if (isValidVideoUrl(vs)) chosenUrl = vs;
                 }
-            };
-            
-            xhr.onload = function() {
-                if (xhr.status >= 200 && xhr.status < 300 && xhr.response) {
-                    var blob = xhr.response;
-                    var reader = new FileReader();
-                    reader.onloadend = function() {
-                        var base64 = reader.result.split(',')[1];
-                        if (base64 && base64.length > 500) {
-                            postSuccessData(base64);
-                        } else {
-                            postDirectUrl(streamUrl);
-                        }
-                    };
-                    reader.readAsDataURL(blob);
-                } else {
-                    postDirectUrl(streamUrl);
-                }
-            };
-            
-            xhr.onerror = function() {
-                postDirectUrl(streamUrl);
-            };
-            
-            xhr.send();
+            }
+
+            finishWithUrl(chosenUrl);
         })();
         """
         

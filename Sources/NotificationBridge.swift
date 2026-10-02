@@ -122,71 +122,6 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
                 observer.observe(target, { subtree: true, characterData: true, childList: true });
             }
 
-            function isVideoMediaUrl(url) {
-                if (!url || typeof url !== 'string' || url.indexOf('http') !== 0) return false;
-                var lower = url.toLowerCase();
-                if (lower.indexOf('.jpeg') !== -1 || lower.indexOf('.jpg') !== -1 ||
-                    lower.indexOf('.png') !== -1 || lower.indexOf('.webp') !== -1 ||
-                    lower.indexOf('~tplv') !== -1 || lower.indexOf('/obj/tos-alisg-p-') !== -1 ||
-                    lower.indexOf('/obj/tos-maliva-p-') !== -1 || lower.indexOf('mime=image') !== -1 ||
-                    lower.indexOf('format=jpg') !== -1 || lower.indexOf('avatar') !== -1 ||
-                    lower.indexOf('/image/') !== -1 || lower.indexOf('cover') !== -1) {
-                    return false;
-                }
-                if (lower.indexOf('.mp4') !== -1 || lower.indexOf('mime_type=video_mp4') !== -1 ||
-                    lower.indexOf('/video/tos/') !== -1 || lower.indexOf('video_id=') !== -1 ||
-                    lower.indexOf('&bytestart=') !== -1 || lower.indexOf('mime=video') !== -1 ||
-                    (lower.indexOf('cdninstagram.com') !== -1 && lower.indexOf('&efg=') !== -1) ||
-                    (lower.indexOf('tiktokcdn.com') !== -1 && lower.indexOf('/video/') !== -1) ||
-                    (lower.indexOf('byteoversea.com') !== -1 && lower.indexOf('/video/') !== -1) ||
-                    (lower.indexOf('ibytedtos.com') !== -1 && lower.indexOf('/video/') !== -1)) {
-                    return true;
-                }
-                return false;
-            }
-
-            // Bind intercepted network video URL to the active playing video element
-            function bindUrlToActiveVideo(url) {
-                if (!isVideoMediaUrl(url)) return;
-                var clean = url.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
-                var videos = Array.from(document.querySelectorAll('video'));
-                var playing = videos.find(function(v) { return !v.paused && v.currentTime > 0; });
-                if (playing) {
-                    playing.__exactMediaUrl = clean;
-                } else if (videos.length > 0) {
-                    var vpY = window.innerHeight / 2;
-                    var centerVid = videos.sort(function(a, b) {
-                        var rA = a.getBoundingClientRect();
-                        var rB = b.getBoundingClientRect();
-                        return Math.abs((rA.top + rA.height / 2) - vpY) - Math.abs((rB.top + rB.height / 2) - vpY);
-                    })[0];
-                    if (centerVid) centerVid.__exactMediaUrl = clean;
-                }
-            }
-
-            // 1. Hook Fetch
-            try {
-                var origFetch = window.fetch;
-                window.fetch = function() {
-                    var url = (typeof arguments[0] === 'string') ? arguments[0] : (arguments[0] && arguments[0].url);
-                    if (url && typeof url === 'string') {
-                        bindUrlToActiveVideo(url);
-                    }
-                    return origFetch.apply(this, arguments);
-                };
-            } catch(e) {}
-
-            // 2. Hook XMLHttpRequest
-            try {
-                var origOpen = XMLHttpRequest.prototype.open;
-                XMLHttpRequest.prototype.open = function(method, url) {
-                    if (url && typeof url === 'string') {
-                        bindUrlToActiveVideo(url);
-                    }
-                    return origOpen.apply(this, arguments);
-                };
-            } catch(e) {}
-
             // Auto-Scroll Engine for TikTok & Instagram Reels
             window.__menubarHubAutoScrollEnabled = true;
             var lastScrollTimestamp = 0;
@@ -277,22 +212,10 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
             function setupVideoListeners() {
                 var videos = document.querySelectorAll('video');
                 videos.forEach(function(video) {
-                    var s = video.currentSrc || video.src;
-                    if (s && isVideoMediaUrl(s)) {
-                        video.__exactMediaUrl = s;
-                    }
-
                     if (video.__menubarHubAttached) return;
                     video.__menubarHubAttached = true;
 
                     var lastTime = 0;
-
-                    video.addEventListener('play', function() {
-                        var curS = video.currentSrc || video.src;
-                        if (curS && isVideoMediaUrl(curS)) {
-                            video.__exactMediaUrl = curS;
-                        }
-                    });
 
                     video.addEventListener('ended', function() {
                         advanceToNextVideo();
