@@ -157,18 +157,18 @@ public class MainViewController: NSViewController {
     private func setupUI() {
         topBar.orientation = .vertical
         topBar.alignment = .centerX
-        topBar.spacing = 8
+        topBar.spacing = 6
         topBar.translatesAutoresizingMaskIntoConstraints = false
-        topBar.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 8, right: 10)
+        topBar.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 6, right: 10)
         topBar.canDrag = { [weak self] in
             return self?.isPinned ?? false
         }
         
-        // 1. Service Bar: Centered Soft Floating Icon Bar
+        // 1. Service Bar: Ultra-Compact Petite Icon Bar (16x16 icon in 20x20 target)
         serviceButtonsStack.orientation = .horizontal
         serviceButtonsStack.distribution = .gravityAreas
         serviceButtonsStack.alignment = .centerY
-        serviceButtonsStack.spacing = 12
+        serviceButtonsStack.spacing = 8
         serviceButtonsStack.translatesAutoresizingMaskIntoConstraints = false
         
         let services = ServiceID.allCases
@@ -184,12 +184,12 @@ public class MainViewController: NSViewController {
             btn.target = self
             btn.action = #selector(serviceButtonClicked(_:))
             btn.wantsLayer = true
-            btn.layer?.cornerRadius = 8
+            btn.layer?.cornerRadius = 5
             
             btn.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                btn.widthAnchor.constraint(equalToConstant: 34),
-                btn.heightAnchor.constraint(equalToConstant: 34)
+                btn.widthAnchor.constraint(equalToConstant: 22),
+                btn.heightAnchor.constraint(equalToConstant: 22)
             ])
             
             serviceButtons.append(btn)
@@ -229,8 +229,8 @@ public class MainViewController: NSViewController {
         pinBtn.action = #selector(togglePin)
         pinBtn.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            pinBtn.widthAnchor.constraint(equalToConstant: 24),
-            pinBtn.heightAnchor.constraint(equalToConstant: 24)
+            pinBtn.widthAnchor.constraint(equalToConstant: 22),
+            pinBtn.heightAnchor.constraint(equalToConstant: 22)
         ])
         updatePinButtonUI()
         
@@ -241,8 +241,8 @@ public class MainViewController: NSViewController {
         autoScrollBtn.action = #selector(toggleAutoScroll)
         autoScrollBtn.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            autoScrollBtn.widthAnchor.constraint(equalToConstant: 24),
-            autoScrollBtn.heightAnchor.constraint(equalToConstant: 24)
+            autoScrollBtn.widthAnchor.constraint(equalToConstant: 22),
+            autoScrollBtn.heightAnchor.constraint(equalToConstant: 22)
         ])
         updateAutoScrollButtonUI()
         
@@ -355,7 +355,7 @@ public class MainViewController: NSViewController {
                 btn.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor
                 btn.layer?.borderWidth = 0
             } else {
-                btn.alphaValue = 0.65
+                btn.alphaValue = 0.50
                 btn.layer?.backgroundColor = NSColor.clear.cgColor
                 btn.layer?.borderWidth = 0
             }
@@ -558,8 +558,8 @@ public class MainViewController: NSViewController {
         iconView.image = service.iconImage
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        iconView.widthAnchor.constraint(equalToConstant: 56).isActive = true
-        iconView.heightAnchor.constraint(equalToConstant: 56).isActive = true
+        iconView.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        iconView.heightAnchor.constraint(equalToConstant: 48).isActive = true
         
         let titleLabel = NSTextField(labelWithString: "\(service.name) (Primary)")
         titleLabel.font = NSFont.systemFont(ofSize: 16, weight: .bold)
