@@ -135,6 +135,7 @@ public class MainViewController: NSViewController {
     private let switchBtn = NSButton()
     private let pinBtn = NSButton()
     private let autoScrollBtn = NSButton()
+    private let downloadBtn = NSButton()
     private let zoomLabel = NSTextField(labelWithString: "100%")
     
     // Native Mode Override (allow user to force in-app web if desired)
@@ -164,7 +165,7 @@ public class MainViewController: NSViewController {
             return self?.isPinned ?? false
         }
         
-        // 1. Service Bar: Ultra-Compact Petite Icon Bar (16x16 icon in 20x20 target)
+        // 1. Service Bar: Ultra-Compact Petite Icon Bar (16x16 icon in 22x22 target)
         serviceButtonsStack.orientation = .horizontal
         serviceButtonsStack.distribution = .gravityAreas
         serviceButtonsStack.alignment = .centerY
@@ -197,12 +198,12 @@ public class MainViewController: NSViewController {
         }
         updateServiceButtonsUI()
         
-        // 2. Navigation Row (Switch Account Pattern + Pin + AutoScroll + Zoom + Navigation)
+        // 2. Navigation Row (Switch Account Pattern + Pin + AutoScroll + Download + Zoom + Navigation)
         let subRow = NSStackView()
         subRow.orientation = .horizontal
         subRow.alignment = .centerY
         subRow.distribution = .fill
-        subRow.spacing = 6
+        subRow.spacing = 5
         subRow.translatesAutoresizingMaskIntoConstraints = false
         
         // "Logged in as: Home" Label & Switch Button ("...")
@@ -246,6 +247,18 @@ public class MainViewController: NSViewController {
         ])
         updateAutoScrollButtonUI()
         
+        // Download Video Button (With Quality Selection Menu)
+        downloadBtn.isBordered = false
+        downloadBtn.bezelStyle = .regularSquare
+        downloadBtn.target = self
+        downloadBtn.action = #selector(showDownloadMenu(_:))
+        downloadBtn.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            downloadBtn.widthAnchor.constraint(equalToConstant: 22),
+            downloadBtn.heightAnchor.constraint(equalToConstant: 22)
+        ])
+        updateDownloadButtonUI()
+        
         // Zoom Controls ( - | 100% | + )
         let zoomOutBtn = createIconButton(symbolName: "minus", toolTip: "Zoom Out", action: #selector(zoomOut))
         let zoomInBtn = createIconButton(symbolName: "plus", toolTip: "Zoom In", action: #selector(zoomIn))
@@ -279,6 +292,7 @@ public class MainViewController: NSViewController {
         subRow.addArrangedSubview(profileStack)
         subRow.addArrangedSubview(pinBtn)
         subRow.addArrangedSubview(autoScrollBtn)
+        subRow.addArrangedSubview(downloadBtn)
         subRow.addArrangedSubview(zoomStack)
         subRow.addArrangedSubview(navStack)
         subRow.addArrangedSubview(quitBtn)
@@ -361,8 +375,9 @@ public class MainViewController: NSViewController {
             }
         }
         
-        // Show auto-scroll button only on TikTok and Instagram
+        // Contextual buttons: Auto-scroll on TikTok/IG; Video Downloader on all media tabs
         autoScrollBtn.isHidden = (currentService != .tiktok && currentService != .instagram)
+        downloadBtn.isHidden = (currentService == .whatsapp || currentService == .telegram)
     }
     
     @objc private func serviceButtonClicked(_ sender: NSButton) {
@@ -442,6 +457,61 @@ public class MainViewController: NSViewController {
             autoScrollBtn.title = isAutoScrollEnabled ? "🟢" : "⚪️"
         }
         autoScrollBtn.toolTip = isAutoScrollEnabled ? "Auto-Scroll: ON (Green - Auto plays next video when current ends)" : "Auto-Scroll: OFF (Click to enable)"
+    }
+    
+    // MARK: - Video Downloader Action
+    private func updateDownloadButtonUI() {
+        if #available(macOS 11.0, *) {
+            let config = NSImage.SymbolConfiguration(paletteColors: [NSColor.systemTeal])
+            downloadBtn.image = NSImage(systemSymbolName: "arrow.down.to.line.circle.fill", accessibilityDescription: "Download Video")?.withSymbolConfiguration(config)
+        } else {
+            downloadBtn.title = "⬇️"
+        }
+        downloadBtn.toolTip = "Download Active Video (Choose Quality)"
+    }
+    
+    @objc private func showDownloadMenu(_ sender: NSButton) {
+        let menu = NSMenu(title: "Download Quality")
+        
+        let highItem = NSMenuItem(title: "🌟 High Quality (Original HD / Best)", action: #selector(downloadHighQuality), keyEquivalent: "")
+        highItem.target = self
+        menu.addItem(highItem)
+        
+        let standardItem = NSMenuItem(title: "📱 Standard Quality (720p / Fast)", action: #selector(downloadStandardQuality), keyEquivalent: "")
+        standardItem.target = self
+        menu.addItem(standardItem)
+        
+        let audioItem = NSMenuItem(title: "🎵 Audio Track Only (M4A / Extract)", action: #selector(downloadAudioOnly), keyEquivalent: "")
+        audioItem.target = self
+        menu.addItem(audioItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        let openFolderItem = NSMenuItem(title: "📂 Open Downloads Folder", action: #selector(openDownloadsDirectory), keyEquivalent: "")
+        openFolderItem.target = self
+        menu.addItem(openFolderItem)
+        
+        let point = NSPoint(x: 0, y: sender.bounds.height + 4)
+        menu.popUp(positioning: nil, at: point, in: sender)
+    }
+    
+    @objc private func downloadHighQuality() {
+        let webView = TabManager.shared.getOrCreateWebView(for: currentService, account: currentAccount)
+        VideoDownloader.shared.downloadVideo(from: webView, service: currentService, quality: "Original HD")
+    }
+    
+    @objc private func downloadStandardQuality() {
+        let webView = TabManager.shared.getOrCreateWebView(for: currentService, account: currentAccount)
+        VideoDownloader.shared.downloadVideo(from: webView, service: currentService, quality: "720p Standard")
+    }
+    
+    @objc private func downloadAudioOnly() {
+        let webView = TabManager.shared.getOrCreateWebView(for: currentService, account: currentAccount)
+        VideoDownloader.shared.downloadVideo(from: webView, service: currentService, quality: "Audio Track")
+    }
+    
+    @objc private func openDownloadsDirectory() {
+        VideoDownloader.shared.openDownloadsFolder()
     }
     
     @objc private func showProfileMenu(_ sender: NSButton) {

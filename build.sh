@@ -14,6 +14,7 @@ swiftc -O -target arm64-apple-macosx12.0 \
   -framework UserNotifications \
   Sources/Service.swift \
   Sources/NotificationBridge.swift \
+  Sources/VideoDownloader.swift \
   Sources/TabManager.swift \
   Sources/MainViewController.swift \
   Sources/AppDelegate.swift \
