@@ -118,145 +118,171 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 return false;
             }
 
-            var chosenUrl = null;
-
-            // --- 1. Find the Exact Active Feed Item Container at Screen Center ---
-            var vpCenterX = window.innerWidth / 2;
-            var vpCenterY = window.innerHeight / 2;
-            var centerEl = document.elementFromPoint(vpCenterX, vpCenterY) || document.body;
+            // --- STEP 1: Find Active Playing Video on Screen ---
+            var allVideos = Array.from(document.querySelectorAll('video'));
+            var playingVideo = allVideos.find(function(v) { return !v.paused && v.currentTime > 0; });
             
-            var container = centerEl.closest('[data-e2e="recommend-list-item-container"], [class*="DivItemContainer"], [class*="DivVideoWrapper"], article, [data-e2e="feed-video"]') || centerEl;
+            if (!playingVideo && allVideos.length > 0) {
+                var vpCenterY = window.innerHeight / 2;
+                playingVideo = allVideos.sort(function(a, b) {
+                    var rA = a.getBoundingClientRect();
+                    var rB = b.getBoundingClientRect();
+                    return Math.abs((rA.top + rA.height / 2) - vpCenterY) - Math.abs((rB.top + rB.height / 2) - vpCenterY);
+                })[0];
+            }
 
-            // --- 2. TikTok Specific: Extract by Unique Video ID from Active Container ---
-            var tiktokLink = container.querySelector('a[href*="/video/"]') || document.querySelector('a[href*="/video/"]');
-            var videoIdMatch = (tiktokLink && tiktokLink.href) ? tiktokLink.href.match(/\\/video\\/(\\d+)/) : window.location.pathname.match(/\\/video\\/(\\d+)/);
-            var videoId = videoIdMatch ? videoIdMatch[1] : null;
+            // Find container of this specific video
+            var container = playingVideo ? (playingVideo.closest('[data-e2e="recommend-list-item-container"]') ||
+                                           playingVideo.closest('[class*="ItemContainer"]') ||
+                                           playingVideo.closest('article') ||
+                                           playingVideo.parentElement.parentElement) : null;
+            if (!container) {
+                var vpCenterY = window.innerHeight / 2;
+                var centerEl = document.elementFromPoint(window.innerWidth / 2, vpCenterY) || document.body;
+                container = centerEl.closest('[data-e2e="recommend-list-item-container"], [class*="ItemContainer"], article') || centerEl;
+            }
 
-            if (videoId) {
-                // Check __UNIVERSAL_DATA_FOR_REHYDRATION__
+            // --- STEP 2: TikTok - Extract Exact Video ID & Query Official Item API ---
+            var videoId = null;
+            if (container) {
+                var allLinks = Array.from(container.querySelectorAll('a[href]'));
+                for (var i = 0; i < allLinks.length; i++) {
+                    var m = allLinks[i].href.match(/\\/video\\/(\\d{15,22})/);
+                    if (m) { videoId = m[1]; break; }
+                }
+            }
+            if (!videoId) {
+                var pageMatch = window.location.pathname.match(/\\/video\\/(\\d{15,22})/);
+                if (pageMatch) videoId = pageMatch[1];
+            }
+
+            function finishWithUrl(url) {
+                if (!url) {
+                    postError("Could not retrieve video stream. Please ensure the video is playing.");
+                    return;
+                }
+                var cleanUrl = url.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
+                
+                fetch(cleanUrl, { credentials: 'include' })
+                    .then(function(res) {
+                        if (!res.ok) throw new Error("Fetch failed");
+                        return res.blob();
+                    })
+                    .then(function(blob) {
+                        var reader = new FileReader();
+                        reader.onloadend = function() {
+                            var base64 = reader.result.split(',')[1];
+                            if (base64 && base64.length > 1000) {
+                                postSuccessData(base64);
+                            } else {
+                                postDirectUrl(cleanUrl);
+                            }
+                        };
+                        reader.readAsDataURL(blob);
+                    })
+                    .catch(function(err) {
+                        postDirectUrl(cleanUrl);
+                    });
+            }
+
+            // If on TikTok and videoId found, query TikTok's internal API directly!
+            if (service === "TikTok" && videoId) {
+                // 1. Check in-memory item modules first
                 try {
-                    var scriptEl = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
-                    if (scriptEl && scriptEl.textContent) {
-                        var parsed = JSON.parse(scriptEl.textContent);
-                        var itemModule = (parsed.__DEFAULT_SCOPE__ && parsed.__DEFAULT_SCOPE__['webapp.app-context'] && parsed.__DEFAULT_SCOPE__['webapp.app-context'].itemModule) ||
-                                         (parsed.defaultScope && parsed.defaultScope['webapp.app-context'] && parsed.defaultScope['webapp.app-context'].itemModule);
-                        if (itemModule && itemModule[videoId] && itemModule[videoId].video) {
-                            var vObj = itemModule[videoId].video;
-                            var playUrl = vObj.playAddr || vObj.downloadAddr;
-                            if (playUrl && isValidVideoUrl(playUrl)) {
-                                chosenUrl = playUrl;
+                    var sEl = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
+                    if (sEl && sEl.textContent) {
+                        var parsed = JSON.parse(sEl.textContent);
+                        var itemMod = (parsed.__DEFAULT_SCOPE__ && parsed.__DEFAULT_SCOPE__['webapp.app-context'] && parsed.__DEFAULT_SCOPE__['webapp.app-context'].itemModule) ||
+                                      (parsed.defaultScope && parsed.defaultScope['webapp.app-context'] && parsed.defaultScope['webapp.app-context'].itemModule);
+                        if (itemMod && itemMod[videoId] && itemMod[videoId].video) {
+                            var pUrl = itemMod[videoId].video.playAddr || itemMod[videoId].video.downloadAddr;
+                            if (pUrl && isValidVideoUrl(pUrl)) {
+                                finishWithUrl(pUrl);
+                                return;
                             }
                         }
                     }
                 } catch(e) {}
-                
-                // Check SIGI_STATE
-                if (!chosenUrl && window.SIGI_STATE && window.SIGI_STATE.ItemModule && window.SIGI_STATE.ItemModule[videoId]) {
-                    var sigiItem = window.SIGI_STATE.ItemModule[videoId];
-                    if (sigiItem.video && (sigiItem.video.playAddr || sigiItem.video.downloadAddr)) {
-                        var sUrl = sigiItem.video.playAddr || sigiItem.video.downloadAddr;
-                        if (isValidVideoUrl(sUrl)) chosenUrl = sUrl;
-                    }
-                }
-            }
 
-            // --- 3. React Fiber Props on the exact active element ---
-            if (!chosenUrl && container) {
-                var el = container;
-                var count = 0;
-                while (el && el !== document.body && count < 6 && !chosenUrl) {
-                    count++;
-                    for (var key in el) {
-                        if (key.indexOf('__react') === 0) {
-                            try {
-                                var val = el[key];
-                                function safeScan(obj, depth) {
-                                    if (!obj || depth > 4 || typeof obj !== 'object' || chosenUrl) return;
-                                    var propKeys = Object.keys(obj);
-                                    for (var k = 0; k < propKeys.length; k++) {
-                                        var p = propKeys[k];
-                                        if (typeof obj[p] === 'string') {
-                                            var str = obj[p];
-                                            if (isValidVideoUrl(str)) {
-                                                chosenUrl = str.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
-                                                return;
-                                            }
-                                        } else if (typeof obj[p] === 'object' && obj[p] !== null && !Array.isArray(obj[p])) {
-                                            safeScan(obj[p], depth + 1);
-                                        }
-                                    }
-                                }
-                                safeScan(val, 0);
-                            } catch(e) {}
+                // 2. Fetch TikTok official item detail endpoint
+                fetch('/api/item/detail/?itemId=' + videoId, { credentials: 'include' })
+                    .then(function(r) { return r.json(); })
+                    .then(function(json) {
+                        var vItem = json && json.itemInfo && json.itemInfo.itemStruct;
+                        if (vItem && vItem.video) {
+                            var directPlay = vItem.video.playAddr || vItem.video.downloadAddr || (vItem.video.bitrateInfo && vItem.video.bitrateInfo[0].PlayAddr.UrlList[0]);
+                            if (directPlay && isValidVideoUrl(directPlay)) {
+                                finishWithUrl(directPlay);
+                                return;
+                            }
                         }
-                    }
-                    el = el.parentElement;
-                }
-            }
-
-            // --- 4. Instagram / Threads / FB / X Specific: Extract from container's video tag ---
-            if (!chosenUrl) {
-                var vidInside = container.querySelector('video');
-                if (vidInside) {
-                    if (vidInside.__exactMediaUrl && isValidVideoUrl(vidInside.__exactMediaUrl)) {
-                        chosenUrl = vidInside.__exactMediaUrl;
-                    }
-                    if (!chosenUrl) {
-                        var vSrc = vidInside.currentSrc || vidInside.src;
-                        if (!vSrc || vSrc.indexOf('blob:') === 0) {
-                            var source = vidInside.querySelector('source');
-                            if (source) vSrc = source.src;
-                        }
-                        if (vSrc && isValidVideoUrl(vSrc)) {
-                            chosenUrl = vSrc;
-                        }
-                    }
-                }
-            }
-
-            // --- 5. Check globally playing video on screen ---
-            if (!chosenUrl) {
-                var allVideos = Array.from(document.querySelectorAll('video'));
-                var playingVid = allVideos.find(function(v) { return !v.paused && v.currentTime > 0; });
-                if (playingVid) {
-                    if (playingVid.__exactMediaUrl && isValidVideoUrl(playingVid.__exactMediaUrl)) {
-                        chosenUrl = playingVid.__exactMediaUrl;
-                    } else {
-                        var pSrc = playingVid.currentSrc || playingVid.src;
-                        if (pSrc && isValidVideoUrl(pSrc)) chosenUrl = pSrc;
-                    }
-                }
-            }
-
-            if (!chosenUrl) {
-                postError("No active video stream detected.\\nPlease play the video on screen, then click Download.");
+                        fallbackExtraction();
+                    })
+                    .catch(function(err) {
+                        fallbackExtraction();
+                    });
                 return;
             }
 
-            // Clean escaped URL
-            chosenUrl = chosenUrl.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
+            fallbackExtraction();
 
-            // Dispatch download: attempt in-browser blob fetch first, fallback to native Swift URLSession
-            fetch(chosenUrl, { credentials: 'include' })
-                .then(function(res) {
-                    if (!res.ok) throw new Error("HTTP error " + res.status);
-                    return res.blob();
-                })
-                .then(function(blob) {
-                    var reader = new FileReader();
-                    reader.onloadend = function() {
-                        var base64 = reader.result.split(',')[1];
-                        if (base64 && base64.length > 1000) {
-                            postSuccessData(base64);
-                        } else {
-                            postDirectUrl(chosenUrl);
+            function fallbackExtraction() {
+                var chosenUrl = null;
+
+                // Check container video tag
+                if (playingVideo) {
+                    var s = playingVideo.currentSrc || playingVideo.src;
+                    if (!s || s.indexOf('blob:') === 0) {
+                        var srcEl = playingVideo.querySelector('source');
+                        if (srcEl) s = srcEl.src;
+                    }
+                    if (isValidVideoUrl(s)) chosenUrl = s;
+                }
+
+                if (!chosenUrl && container) {
+                    var vidInside = container.querySelector('video');
+                    if (vidInside) {
+                        var vs = vidInside.currentSrc || vidInside.src;
+                        if (isValidVideoUrl(vs)) chosenUrl = vs;
+                    }
+                }
+
+                // Check React Fiber
+                if (!chosenUrl && container) {
+                    var el = container;
+                    var count = 0;
+                    while (el && el !== document.body && count < 6 && !chosenUrl) {
+                        count++;
+                        for (var key in el) {
+                            if (key.indexOf('__react') === 0) {
+                                try {
+                                    var val = el[key];
+                                    function safeScan(obj, depth) {
+                                        if (!obj || depth > 4 || typeof obj !== 'object' || chosenUrl) return;
+                                        var propKeys = Object.keys(obj);
+                                        for (var k = 0; k < propKeys.length; k++) {
+                                            var p = propKeys[k];
+                                            if (typeof obj[p] === 'string') {
+                                                var str = obj[p];
+                                                if (isValidVideoUrl(str)) {
+                                                    chosenUrl = str;
+                                                    return;
+                                                }
+                                            } else if (typeof obj[p] === 'object' && obj[p] !== null && !Array.isArray(obj[p])) {
+                                                safeScan(obj[p], depth + 1);
+                                            }
+                                        }
+                                    }
+                                    safeScan(val, 0);
+                                } catch(e) {}
+                            }
                         }
-                    };
-                    reader.readAsDataURL(blob);
-                })
-                .catch(function(err) {
-                    postDirectUrl(chosenUrl);
-                });
+                        el = el.parentElement;
+                    }
+                }
+
+                finishWithUrl(chosenUrl);
+            }
         })();
         """
         
@@ -348,11 +374,9 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
         let destinationURL = downloadsDirectory.appendingPathComponent(filename)
         
         do {
-            // Verify downloaded file size and type
             let attributes = try FileManager.default.attributesOfItem(atPath: location.path)
             let fileSize = attributes[.size] as? Int64 ?? 0
             
-            // If downloaded file is too small (e.g. less than 10 KB), it might be an invalid response
             if fileSize < 10000 {
                 DispatchQueue.main.async {
                     self.delegate?.didFailDownload(error: "Stream expired or protected")
