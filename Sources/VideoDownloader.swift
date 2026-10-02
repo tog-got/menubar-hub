@@ -3,8 +3,15 @@ import AppKit
 import WebKit
 import UserNotifications
 
+public protocol VideoDownloaderDelegate: AnyObject {
+    func didUpdateDownloadProgress(percent: Double, serviceName: String)
+    func didFinishDownload(filename: String, serviceName: String)
+    func didFailDownload(error: String)
+}
+
 public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownloadDelegate {
     public static let shared = VideoDownloader()
+    public weak var delegate: VideoDownloaderDelegate?
     
     private var downloadSession: URLSession!
     private var activeTasks: [Int: (serviceName: String, quality: String)] = [:]
@@ -38,6 +45,7 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
             // 3. If Error occurred
             if let errorMsg = dict["error"] as? String {
                 DispatchQueue.main.async {
+                    self.delegate?.didFailDownload(error: errorMsg)
                     self.showErrorAlert(message: errorMsg)
                 }
             }
@@ -70,117 +78,90 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 });
             }
 
-            var candidates = [];
+            // Step 1: Find the EXACT video currently visible and playing in the user viewport
+            var allVideos = Array.from(document.querySelectorAll('video'));
+            var vpCenterY = window.innerHeight / 2;
 
-            // 1. Check live media sniffer array (Max Video Downloader stream buffer)
-            if (window.__menubarHubDetectedVideos && window.__menubarHubDetectedVideos.length > 0) {
-                window.__menubarHubDetectedVideos.forEach(function(item) {
-                    if (item.url && item.url.indexOf('http') === 0) {
-                        candidates.push(item.url);
-                    }
-                });
+            // Prioritize playing videos
+            var activeVideo = allVideos.find(function(v) { return !v.paused && v.currentTime > 0; });
+
+            // If none playing, pick the video closest to the center of the viewport
+            if (!activeVideo && allVideos.length > 0) {
+                activeVideo = allVideos.sort(function(a, b) {
+                    var rA = a.getBoundingClientRect();
+                    var rB = b.getBoundingClientRect();
+                    var distA = Math.abs((rA.top + rA.height / 2) - vpCenterY);
+                    var distB = Math.abs((rB.top + rB.height / 2) - vpCenterY);
+                    return distA - distB;
+                })[0];
             }
 
-            // 2. Scan all video elements on the page (including shadow roots)
-            function findVideos(root) {
-                var list = [];
-                try {
-                    var vids = root.querySelectorAll('video');
-                    vids.forEach(function(v) { list.push(v); });
-                    
-                    var allElements = root.querySelectorAll('*');
-                    allElements.forEach(function(el) {
-                        if (el.shadowRoot) {
-                            list = list.concat(findVideos(el.shadowRoot));
-                        }
-                    });
-                } catch(e) {}
-                return list;
-            }
+            var chosenUrl = null;
 
-            var allVideos = findVideos(document);
-            allVideos.forEach(function(v) {
-                var s = v.currentSrc || v.src;
+            // Step 2: Extract currentSrc / src directly from this exact active video
+            if (activeVideo) {
+                var s = activeVideo.currentSrc || activeVideo.src;
                 if (!s) {
-                    var source = v.querySelector('source');
-                    if (source) s = source.src;
+                    var srcEl = activeVideo.querySelector('source');
+                    if (srcEl) s = srcEl.src;
                 }
-                if (!s) s = v.getAttribute('src') || v.getAttribute('data-src');
+                if (!s) s = activeVideo.getAttribute('src') || activeVideo.getAttribute('data-src');
                 if (s && s.indexOf('http') === 0) {
-                    candidates.unshift(s);
+                    chosenUrl = s;
                 }
-            });
+            }
 
-            // 3. Scan performance network resource entries
-            try {
-                var entries = window.performance.getEntriesByType('resource') || [];
-                for (var i = entries.length - 1; i >= 0; i--) {
-                    var name = entries[i].name || '';
-                    if (name.indexOf('http') === 0) {
-                        if (name.indexOf('.mp4') !== -1 ||
-                            name.indexOf('mime_type=video_mp4') !== -1 ||
-                            name.indexOf('video_id=') !== -1 ||
-                            name.indexOf('tiktokcdn') !== -1 ||
-                            name.indexOf('byteoversea') !== -1 ||
-                            name.indexOf('ibytedtos') !== -1 ||
-                            name.indexOf('pstatp') !== -1 ||
-                            name.indexOf('cdninstagram') !== -1 ||
-                            name.indexOf('fbcdn.net') !== -1 ||
-                            name.indexOf('twimg.com') !== -1) {
-                            candidates.push(name);
+            // Step 3: If activeVideo has a blob URL or empty src, check its direct parent item container (TikTok / IG / FB)
+            if (!chosenUrl && activeVideo) {
+                var itemContainer = activeVideo.closest('[data-e2e="recommend-list-item-container"]') ||
+                                    activeVideo.closest('article') ||
+                                    activeVideo.closest('[data-e2e="feed-video"]') ||
+                                    activeVideo.parentElement;
+                if (itemContainer) {
+                    var links = itemContainer.querySelectorAll('a, source, link');
+                    for (var i = 0; i < links.length; i++) {
+                        var h = links[i].href || links[i].src;
+                        if (h && (h.indexOf('.mp4') !== -1 || h.indexOf('mime_type=video_mp4') !== -1 || h.indexOf('tiktokcdn') !== -1 || h.indexOf('cdninstagram') !== -1)) {
+                            chosenUrl = h;
+                            break;
                         }
                     }
                 }
-            } catch(e) {}
+            }
 
-            // 4. Scan in-page hydration state (TikTok / IG / Threads JSON state)
-            try {
-                var tiktokScript = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__') || document.getElementById('SIGI_STATE');
-                if (tiktokScript && tiktokScript.textContent) {
-                    var data = JSON.parse(tiktokScript.textContent);
-                    var str = JSON.stringify(data);
-                    var matches = str.match(/https:\\/\\/[^"\\s]+\\.(?:mp4|byteoversea|ibytedtos|tiktokcdn)[^"\\s]*/g);
-                    if (matches) {
-                        matches.forEach(function(m) {
-                            var cleanUrl = m.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
-                            candidates.push(cleanUrl);
-                        });
-                    }
-                }
-            } catch(e) {}
+            // Step 4: Check recent media sniffer list (find the most recent stream)
+            if (!chosenUrl && window.__menubarHubDetectedVideos && window.__menubarHubDetectedVideos.length > 0) {
+                chosenUrl = window.__menubarHubDetectedVideos[0].url;
+            }
 
-            try {
-                var jsonScripts = document.querySelectorAll('script[type="application/json"]');
-                jsonScripts.forEach(function(s) {
-                    if (!s.textContent) return;
-                    var text = s.textContent;
-                    if (text.indexOf('video_versions') !== -1 || text.indexOf('browser_native_hd_url') !== -1 || text.indexOf('cdninstagram') !== -1 || text.indexOf('fbcdn.net') !== -1) {
-                        var matches = text.match(/https:\\/\\/[^"\\s]+(?:cdninstagram\\.com|fbcdn\\.net)[^"\\s]+(?:\\.mp4|\\?bytestart=[^"\\s]+)/g);
-                        if (matches) {
-                            matches.forEach(function(m) {
-                                var cleanUrl = m.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
-                                candidates.push(cleanUrl);
-                            });
+            // Step 5: Check performance network entries
+            if (!chosenUrl) {
+                try {
+                    var entries = window.performance.getEntriesByType('resource') || [];
+                    for (var j = entries.length - 1; j >= 0; j--) {
+                        var name = entries[j].name || '';
+                        if (name.indexOf('http') === 0) {
+                            if (name.indexOf('.mp4') !== -1 ||
+                                name.indexOf('mime_type=video_mp4') !== -1 ||
+                                name.indexOf('tiktokcdn') !== -1 ||
+                                name.indexOf('byteoversea') !== -1 ||
+                                name.indexOf('cdninstagram') !== -1 ||
+                                name.indexOf('fbcdn.net') !== -1) {
+                                chosenUrl = name;
+                                break;
+                            }
                         }
                     }
-                });
-            } catch(e) {}
+                } catch(e) {}
+            }
 
-            // Remove duplicates
-            var uniqueCandidates = [];
-            candidates.forEach(function(u) {
-                if (uniqueCandidates.indexOf(u) === -1) uniqueCandidates.push(u);
-            });
-
-            if (uniqueCandidates.length === 0) {
-                postError("No downloadable video detected yet.\\nPlay a video on screen for a moment, then click Download.");
+            if (!chosenUrl) {
+                postError("No active video found on screen.\\nPlease make sure the video is playing, then try again.");
                 return;
             }
 
-            var bestUrl = uniqueCandidates[0];
-
             // Attempt in-browser blob fetch first, fallback to native Swift URLSession
-            fetch(bestUrl, { credentials: 'include' })
+            fetch(chosenUrl, { credentials: 'include' })
                 .then(function(res) {
                     if (!res.ok) throw new Error("HTTP error " + res.status);
                     return res.blob();
@@ -192,13 +173,13 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                         if (base64 && base64.length > 500) {
                             postSuccessData(base64);
                         } else {
-                            postDirectUrl(bestUrl);
+                            postDirectUrl(chosenUrl);
                         }
                     };
                     reader.readAsDataURL(blob);
                 })
                 .catch(function(err) {
-                    postDirectUrl(bestUrl);
+                    postDirectUrl(chosenUrl);
                 });
         })();
         """
@@ -228,6 +209,7 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
             task.resume()
             
             DispatchQueue.main.async {
+                self.delegate?.didUpdateDownloadProgress(percent: 0.0, serviceName: serviceName)
                 self.showNotification(
                     title: "Downloading \(serviceName) Video...",
                     body: "Quality: \(quality). File will be saved to your Downloads folder."
@@ -248,6 +230,7 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
         do {
             try data.write(to: destinationURL)
             DispatchQueue.main.async {
+                self.delegate?.didFinishDownload(filename: filename, serviceName: serviceName)
                 self.showNotification(
                     title: "🎬 \(serviceName) Video Downloaded!",
                     body: "Saved as \(filename) in ~/Downloads"
@@ -256,7 +239,22 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
         } catch {
             NSLog("[VideoDownloader] Failed to write data: %@", error.localizedDescription)
             DispatchQueue.main.async {
+                self.delegate?.didFailDownload(error: error.localizedDescription)
                 self.showErrorAlert(message: "Failed to save file: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    // Track download progress in real-time
+    public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        if totalBytesExpectedToWrite > 0 {
+            let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+            let percent = progress * 100.0
+            let taskInfo = activeTasks[downloadTask.taskIdentifier]
+            let serviceName = taskInfo?.serviceName ?? "Video"
+            
+            DispatchQueue.main.async {
+                self.delegate?.didUpdateDownloadProgress(percent: percent, serviceName: serviceName)
             }
         }
     }
@@ -280,6 +278,7 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
             try FileManager.default.moveItem(at: location, to: destinationURL)
             
             DispatchQueue.main.async {
+                self.delegate?.didFinishDownload(filename: filename, serviceName: serviceName)
                 self.showNotification(
                     title: "🎬 \(serviceName) Video Downloaded!",
                     body: "Saved as \(filename) in ~/Downloads"
@@ -296,6 +295,7 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
         if let error = error {
             NSLog("[VideoDownloader] Download task failed: %@", error.localizedDescription)
             DispatchQueue.main.async {
+                self.delegate?.didFailDownload(error: error.localizedDescription)
                 self.showErrorAlert(message: "Download failed: \(error.localizedDescription)")
             }
         }

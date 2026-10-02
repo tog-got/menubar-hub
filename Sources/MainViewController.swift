@@ -105,7 +105,7 @@ class DraggableStackView: NSStackView {
     }
 }
 
-public class MainViewController: NSViewController {
+public class MainViewController: NSViewController, VideoDownloaderDelegate {
     private var currentService: ServiceID = .whatsapp
     private var currentAccount: Int = 1
     private var isPinned: Bool = false
@@ -136,6 +136,7 @@ public class MainViewController: NSViewController {
     private let pinBtn = NSButton()
     private let autoScrollBtn = NSButton()
     private let downloadBtn = NSButton()
+    private let downloadProgressLabel = NSTextField(labelWithString: "")
     private let zoomLabel = NSTextField(labelWithString: "100%")
     
     // Native Mode Override (allow user to force in-app web if desired)
@@ -150,6 +151,8 @@ public class MainViewController: NSViewController {
         self.view = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
         self.view.wantsLayer = true
         self.view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        
+        VideoDownloader.shared.delegate = self
         
         setupUI()
         loadCurrentTab()
@@ -198,7 +201,7 @@ public class MainViewController: NSViewController {
         }
         updateServiceButtonsUI()
         
-        // 2. Navigation Row (Switch Account Pattern + Pin + AutoScroll + Download + Zoom + Navigation)
+        // 2. Navigation Row (Switch Account Pattern + Pin + AutoScroll + Download + Progress + Zoom + Navigation)
         let subRow = NSStackView()
         subRow.orientation = .horizontal
         subRow.alignment = .centerY
@@ -259,6 +262,11 @@ public class MainViewController: NSViewController {
         ])
         updateDownloadButtonUI()
         
+        // Real-time Download Progress Label
+        downloadProgressLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
+        downloadProgressLabel.textColor = NSColor.systemBlue
+        downloadProgressLabel.isHidden = true
+        
         // Zoom Controls ( - | 100% | + )
         let zoomOutBtn = createIconButton(symbolName: "minus", toolTip: "Zoom Out", action: #selector(zoomOut))
         let zoomInBtn = createIconButton(symbolName: "plus", toolTip: "Zoom In", action: #selector(zoomIn))
@@ -293,6 +301,7 @@ public class MainViewController: NSViewController {
         subRow.addArrangedSubview(pinBtn)
         subRow.addArrangedSubview(autoScrollBtn)
         subRow.addArrangedSubview(downloadBtn)
+        subRow.addArrangedSubview(downloadProgressLabel)
         subRow.addArrangedSubview(zoomStack)
         subRow.addArrangedSubview(navStack)
         subRow.addArrangedSubview(quitBtn)
@@ -481,7 +490,7 @@ public class MainViewController: NSViewController {
         standardItem.target = self
         menu.addItem(standardItem)
         
-        let audioItem = NSMenuItem(title: "🎵 Audio Track Only (M4A / Extract)", action: #selector(downloadAudioOnly), keyEquivalent: "")
+        let audioItem = NSMenuItem(title: "🎵 Audio Track Only (M4A / MP3)", action: #selector(downloadAudioOnly), keyEquivalent: "")
         audioItem.target = self
         menu.addItem(audioItem)
         
@@ -512,6 +521,33 @@ public class MainViewController: NSViewController {
     
     @objc private func openDownloadsDirectory() {
         VideoDownloader.shared.openDownloadsFolder()
+    }
+    
+    // MARK: - VideoDownloaderDelegate
+    public func didUpdateDownloadProgress(percent: Double, serviceName: String) {
+        downloadProgressLabel.isHidden = false
+        downloadProgressLabel.stringValue = "⬇ \(Int(percent))%"
+        downloadProgressLabel.textColor = NSColor.systemBlue
+    }
+    
+    public func didFinishDownload(filename: String, serviceName: String) {
+        downloadProgressLabel.isHidden = false
+        downloadProgressLabel.stringValue = "✓ Saved!"
+        downloadProgressLabel.textColor = NSColor.systemGreen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            self?.downloadProgressLabel.stringValue = ""
+            self?.downloadProgressLabel.isHidden = true
+        }
+    }
+    
+    public func didFailDownload(error: String) {
+        downloadProgressLabel.isHidden = false
+        downloadProgressLabel.stringValue = "✗ Failed"
+        downloadProgressLabel.textColor = NSColor.systemRed
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            self?.downloadProgressLabel.stringValue = ""
+            self?.downloadProgressLabel.isHidden = true
+        }
     }
     
     @objc private func showProfileMenu(_ sender: NSButton) {
