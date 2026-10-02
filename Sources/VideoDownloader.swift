@@ -118,46 +118,53 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                 return false;
             }
 
-            // --- 1. Find the Exact Active Video in Center of Viewport ---
-            var vpCenterY = window.innerHeight / 2;
-            var allVideos = Array.from(document.querySelectorAll('video'));
-
-            var activeVideo = allVideos.find(function(v) { return !v.paused && v.currentTime > 0; });
-            if (!activeVideo && allVideos.length > 0) {
-                activeVideo = allVideos.sort(function(a, b) {
-                    var rA = a.getBoundingClientRect();
-                    var rB = b.getBoundingClientRect();
-                    return Math.abs((rA.top + rA.height / 2) - vpCenterY) - Math.abs((rB.top + rB.height / 2) - vpCenterY);
-                })[0];
-            }
-
             var chosenUrl = null;
 
-            // Priority 1: Check if active video has bound exact stream URL from sniffer
-            if (activeVideo && activeVideo.__exactMediaUrl && isValidVideoUrl(activeVideo.__exactMediaUrl)) {
-                chosenUrl = activeVideo.__exactMediaUrl;
+            // --- 1. Find the Exact Active Feed Item Container at Screen Center ---
+            var vpCenterX = window.innerWidth / 2;
+            var vpCenterY = window.innerHeight / 2;
+            var centerEl = document.elementFromPoint(vpCenterX, vpCenterY) || document.body;
+            
+            var container = centerEl.closest('[data-e2e="recommend-list-item-container"], [class*="DivItemContainer"], [class*="DivVideoWrapper"], article, [data-e2e="feed-video"]') || centerEl;
+
+            // --- 2. TikTok Specific: Extract by Unique Video ID ---
+            var tiktokLink = container.querySelector('a[href*="/video/"]') || document.querySelector('a[href*="/video/"]');
+            var videoIdMatch = (tiktokLink && tiktokLink.href) ? tiktokLink.href.match(/\\/video\\/(\\d+)/) : window.location.pathname.match(/\\/video\\/(\\d+)/);
+            var videoId = videoIdMatch ? videoIdMatch[1] : null;
+
+            if (videoId) {
+                // Check __UNIVERSAL_DATA_FOR_REHYDRATION__
+                try {
+                    var scriptEl = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
+                    if (scriptEl && scriptEl.textContent) {
+                        var parsed = JSON.parse(scriptEl.textContent);
+                        var itemModule = (parsed.__DEFAULT_SCOPE__ && parsed.__DEFAULT_SCOPE__['webapp.app-context'] && parsed.__DEFAULT_SCOPE__['webapp.app-context'].itemModule) ||
+                                         (parsed.defaultScope && parsed.defaultScope['webapp.app-context'] && parsed.defaultScope['webapp.app-context'].itemModule);
+                        if (itemModule && itemModule[videoId] && itemModule[videoId].video) {
+                            var vObj = itemModule[videoId].video;
+                            var playUrl = vObj.playAddr || vObj.downloadAddr;
+                            if (playUrl && isValidVideoUrl(playUrl)) {
+                                chosenUrl = playUrl;
+                            }
+                        }
+                    }
+                } catch(e) {}
+                
+                // Check SIGI_STATE
+                if (!chosenUrl && window.SIGI_STATE && window.SIGI_STATE.ItemModule && window.SIGI_STATE.ItemModule[videoId]) {
+                    var sigiItem = window.SIGI_STATE.ItemModule[videoId];
+                    if (sigiItem.video && (sigiItem.video.playAddr || sigiItem.video.downloadAddr)) {
+                        var sUrl = sigiItem.video.playAddr || sigiItem.video.downloadAddr;
+                        if (isValidVideoUrl(sUrl)) chosenUrl = sUrl;
+                    }
+                }
             }
 
-            // Priority 2: Check active video currentSrc / src
-            if (!chosenUrl && activeVideo) {
-                var s = activeVideo.currentSrc || activeVideo.src;
-                if (!s || s.indexOf('blob:') === 0) {
-                    var srcEl = activeVideo.querySelector('source');
-                    if (srcEl) s = srcEl.src;
-                }
-                if (!s || s.indexOf('blob:') === 0) {
-                    s = activeVideo.getAttribute('src') || activeVideo.getAttribute('data-src');
-                }
-                if (isValidVideoUrl(s)) {
-                    chosenUrl = s;
-                }
-            }
-
-            // Priority 3: Scan React Fiber on active video's parent container
-            if (!chosenUrl && activeVideo) {
-                var el = activeVideo;
+            // --- 3. React Fiber Props on the exact active element ---
+            if (!chosenUrl && container) {
+                var el = container;
                 var count = 0;
-                while (el && el !== document.body && count < 8) {
+                while (el && el !== document.body && count < 6 && !chosenUrl) {
                     count++;
                     for (var key in el) {
                         if (key.indexOf('__react') === 0) {
@@ -183,31 +190,53 @@ public class VideoDownloader: NSObject, WKScriptMessageHandler, URLSessionDownlo
                             } catch(e) {}
                         }
                     }
-                    if (chosenUrl) break;
                     el = el.parentElement;
                 }
             }
 
-            // Priority 4: Performance network entries
+            // --- 4. Instagram / Threads / FB / X Specific: Extract from container's video tag ---
             if (!chosenUrl) {
-                try {
-                    var entries = window.performance.getEntriesByType('resource') || [];
-                    for (var j = entries.length - 1; j >= 0; j--) {
-                        var name = entries[j].name || '';
-                        if (isValidVideoUrl(name)) {
-                            chosenUrl = name;
-                            break;
+                var vidInside = container.querySelector('video');
+                if (vidInside) {
+                    if (vidInside.__exactMediaUrl && isValidVideoUrl(vidInside.__exactMediaUrl)) {
+                        chosenUrl = vidInside.__exactMediaUrl;
+                    }
+                    if (!chosenUrl) {
+                        var vSrc = vidInside.currentSrc || vidInside.src;
+                        if (!vSrc || vSrc.indexOf('blob:') === 0) {
+                            var source = vidInside.querySelector('source');
+                            if (source) vSrc = source.src;
+                        }
+                        if (vSrc && isValidVideoUrl(vSrc)) {
+                            chosenUrl = vSrc;
                         }
                     }
-                } catch(e) {}
+                }
+            }
+
+            // --- 5. Check globally playing video on screen ---
+            if (!chosenUrl) {
+                var allVideos = Array.from(document.querySelectorAll('video'));
+                var playingVid = allVideos.find(function(v) { return !v.paused && v.currentTime > 0; });
+                if (playingVid) {
+                    if (playingVid.__exactMediaUrl && isValidVideoUrl(playingVid.__exactMediaUrl)) {
+                        chosenUrl = playingVid.__exactMediaUrl;
+                    } else {
+                        var pSrc = playingVid.currentSrc || playingVid.src;
+                        if (pSrc && isValidVideoUrl(pSrc)) chosenUrl = pSrc;
+                    }
+                }
             }
 
             if (!chosenUrl) {
-                postError("No active video stream detected.\\nPlease start playing the video on screen, then try again.");
+                postError("No active video stream detected.\\nPlease play the video on screen, then click Download.");
                 return;
             }
 
-            // Attempt in-browser blob fetch first, fallback to native Swift URLSession
+            // Clean escaped URL
+            chosenUrl = chosenUrl.replace(/\\\\u0026/g, '&').replace(/\\\\/g, '');
+
+            // Dispatch download: attempt in-browser blob fetch first, fallback to native Swift URLSession
             fetch(chosenUrl, { credentials: 'include' })
                 .then(function(res) {
                     if (!res.ok) throw new Error("HTTP error " + res.status);
