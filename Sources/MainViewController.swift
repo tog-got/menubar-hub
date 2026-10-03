@@ -1,22 +1,25 @@
 import Cocoa
 import WebKit
 
-// Enum for Resize side
-enum ResizeGripSide {
+// Enum for all 8 resize edge/corner handles
+enum ResizeHandleEdge {
     case left
     case right
+    case bottom
+    case bottomLeft
+    case bottomRight
 }
 
-// Custom handle view for dragging to resize popover from left or right corner
-class ResizeGripView: NSView {
-    let side: ResizeGripSide
+// Custom handle view for dragging to resize popover from any border or corner
+class ResizeEdgeHandleView: NSView {
+    let edge: ResizeHandleEdge
     var onResize: ((NSSize) -> Void)?
     private var initialMouseLocation: NSPoint = .zero
     private var initialSize: NSSize = .zero
     
-    init(side: ResizeGripSide) {
-        self.side = side
-        super.init(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
+    init(edge: ResizeHandleEdge) {
+        self.edge = edge
+        super.init(frame: .zero)
         wantsLayer = true
         toolTip = "Drag to resize window"
     }
@@ -26,26 +29,35 @@ class ResizeGripView: NSView {
     }
     
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .crosshair)
+        let cursor: NSCursor
+        switch edge {
+        case .left, .right:
+            cursor = .resizeLeftRight
+        case .bottom:
+            cursor = .resizeUpDown
+        case .bottomLeft, .bottomRight:
+            cursor = .crosshair
+        }
+        addCursorRect(bounds, cursor: cursor)
     }
     
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        guard edge == .bottomLeft || edge == .bottomRight else { return }
         guard let context = NSGraphicsContext.current?.cgContext else { return }
+        
         context.saveGState()
-        context.setStrokeColor(NSColor.labelColor.withAlphaComponent(0.45).cgColor)
-        context.setLineWidth(1.6)
+        context.setStrokeColor(NSColor.labelColor.withAlphaComponent(0.35).cgColor)
+        context.setLineWidth(1.5)
         context.setLineCap(.round)
         
         let w = bounds.width
         for i in 0..<3 {
-            let offset = CGFloat(i * 5) + 5
-            if side == .right {
-                // Bottom-right diagonal lines ( / )
+            let offset = CGFloat(i * 4) + 4
+            if edge == .bottomRight {
                 context.move(to: CGPoint(x: w - 3, y: offset))
                 context.addLine(to: CGPoint(x: w - offset, y: 3))
             } else {
-                // Bottom-left diagonal lines ( \ )
                 context.move(to: CGPoint(x: 3, y: offset))
                 context.addLine(to: CGPoint(x: offset, y: 3))
             }
@@ -64,16 +76,26 @@ class ResizeGripView: NSView {
     override func mouseDragged(with event: NSEvent) {
         let currentLocation = NSEvent.mouseLocation
         let deltaY = initialMouseLocation.y - currentLocation.y
-        let deltaX: CGFloat
+        let deltaXRight = currentLocation.x - initialMouseLocation.x
+        let deltaXLeft = initialMouseLocation.x - currentLocation.x
         
-        if side == .right {
-            deltaX = currentLocation.x - initialMouseLocation.x
-        } else {
-            deltaX = initialMouseLocation.x - currentLocation.x
+        var newWidth = initialSize.width
+        var newHeight = initialSize.height
+        
+        switch edge {
+        case .right:
+            newWidth = max(380, min(1400, initialSize.width + deltaXRight))
+        case .left:
+            newWidth = max(380, min(1400, initialSize.width + deltaXLeft))
+        case .bottom:
+            newHeight = max(480, min(1100, initialSize.height + deltaY))
+        case .bottomRight:
+            newWidth = max(380, min(1400, initialSize.width + deltaXRight))
+            newHeight = max(480, min(1100, initialSize.height + deltaY))
+        case .bottomLeft:
+            newWidth = max(380, min(1400, initialSize.width + deltaXLeft))
+            newHeight = max(480, min(1100, initialSize.height + deltaY))
         }
-        
-        let newWidth = max(380, min(1200, initialSize.width + deltaX))
-        let newHeight = max(500, min(1000, initialSize.height + deltaY))
         
         onResize?(NSSize(width: newWidth, height: newHeight))
     }
@@ -119,9 +141,12 @@ public class MainViewController: NSViewController, VideoDownloaderDelegate {
     private var serviceButtons: [NSButton] = []
     private let containerView = NSView()
     
-    // Resize grips on both bottom corners
-    private let leftGrip = ResizeGripView(side: .left)
-    private let rightGrip = ResizeGripView(side: .right)
+    // All Edge & Corner Resize Handles (Full perimeter resizing)
+    private let leftEdgeHandle = ResizeEdgeHandleView(edge: .left)
+    private let rightEdgeHandle = ResizeEdgeHandleView(edge: .right)
+    private let bottomEdgeHandle = ResizeEdgeHandleView(edge: .bottom)
+    private let bottomLeftGrip = ResizeEdgeHandleView(edge: .bottomLeft)
+    private let bottomRightGrip = ResizeEdgeHandleView(edge: .bottomRight)
     
     // Profile information
     public let profileNames = [
@@ -318,22 +343,31 @@ public class MainViewController: NSViewController, VideoDownloaderDelegate {
         divider.boxType = .separator
         divider.translatesAutoresizingMaskIntoConstraints = false
         
-        // 4. Resize Grips (Both Bottom-Left and Bottom-Right)
-        leftGrip.translatesAutoresizingMaskIntoConstraints = false
-        leftGrip.onResize = { [weak self] newSize in
+        // 4. Configure All Perimeter Resize Handles (Left, Right, Bottom, Corners)
+        let resizeCallback: (NSSize) -> Void = { [weak self] newSize in
             self?.handleUserResize(newSize: newSize)
         }
         
-        rightGrip.translatesAutoresizingMaskIntoConstraints = false
-        rightGrip.onResize = { [weak self] newSize in
-            self?.handleUserResize(newSize: newSize)
-        }
+        leftEdgeHandle.onResize = resizeCallback
+        rightEdgeHandle.onResize = resizeCallback
+        bottomEdgeHandle.onResize = resizeCallback
+        bottomLeftGrip.onResize = resizeCallback
+        bottomRightGrip.onResize = resizeCallback
+        
+        leftEdgeHandle.translatesAutoresizingMaskIntoConstraints = false
+        rightEdgeHandle.translatesAutoresizingMaskIntoConstraints = false
+        bottomEdgeHandle.translatesAutoresizingMaskIntoConstraints = false
+        bottomLeftGrip.translatesAutoresizingMaskIntoConstraints = false
+        bottomRightGrip.translatesAutoresizingMaskIntoConstraints = false
         
         view.addSubview(topBar)
         view.addSubview(divider)
         view.addSubview(containerView)
-        view.addSubview(leftGrip)
-        view.addSubview(rightGrip)
+        view.addSubview(leftEdgeHandle)
+        view.addSubview(rightEdgeHandle)
+        view.addSubview(bottomEdgeHandle)
+        view.addSubview(bottomLeftGrip)
+        view.addSubview(bottomRightGrip)
         
         NSLayoutConstraint.activate([
             topBar.topAnchor.constraint(equalTo: view.topAnchor),
@@ -353,17 +387,35 @@ public class MainViewController: NSViewController, VideoDownloaderDelegate {
             containerView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             containerView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             
-            // Left Grip
-            leftGrip.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 1),
-            leftGrip.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -1),
-            leftGrip.widthAnchor.constraint(equalToConstant: 22),
-            leftGrip.heightAnchor.constraint(equalToConstant: 22),
+            // Left Edge Handle (Full left border)
+            leftEdgeHandle.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            leftEdgeHandle.topAnchor.constraint(equalTo: topBar.bottomAnchor),
+            leftEdgeHandle.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -18),
+            leftEdgeHandle.widthAnchor.constraint(equalToConstant: 8),
             
-            // Right Grip
-            rightGrip.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -1),
-            rightGrip.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -1),
-            rightGrip.widthAnchor.constraint(equalToConstant: 22),
-            rightGrip.heightAnchor.constraint(equalToConstant: 22)
+            // Right Edge Handle (Full right border)
+            rightEdgeHandle.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            rightEdgeHandle.topAnchor.constraint(equalTo: topBar.bottomAnchor),
+            rightEdgeHandle.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -18),
+            rightEdgeHandle.widthAnchor.constraint(equalToConstant: 8),
+            
+            // Bottom Edge Handle (Full bottom border between corners)
+            bottomEdgeHandle.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18),
+            bottomEdgeHandle.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
+            bottomEdgeHandle.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            bottomEdgeHandle.heightAnchor.constraint(equalToConstant: 8),
+            
+            // Bottom Left Corner Handle
+            bottomLeftGrip.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            bottomLeftGrip.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            bottomLeftGrip.widthAnchor.constraint(equalToConstant: 20),
+            bottomLeftGrip.heightAnchor.constraint(equalToConstant: 20),
+            
+            // Bottom Right Corner Handle
+            bottomRightGrip.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            bottomRightGrip.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            bottomRightGrip.widthAnchor.constraint(equalToConstant: 20),
+            bottomRightGrip.heightAnchor.constraint(equalToConstant: 20)
         ])
         
         updateProfileUI()
