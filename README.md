@@ -10,7 +10,7 @@ Di mesin Mac dengan RAM 8GB (Unified Memory), membuka aplikasi berbasis Electron
 
 **MenuBarHub menyelesaikan masalah ini dengan 5 pilar utama:**
 1. **Ukuran Super Ringan (Biner Native ~160 KB)**: Dibangun murni dengan Swift dan WebKit bawaan sistem operasi macOS tanpa dependensi Chromium/Electron.
-2. **Grace Period 4 Menit & Auto-Purge**: Tab media sosial yang tidak disentuh selama 4 menit otomatis dimatikan dari RAM (0 MB).
+2. **Grace Period 2 Menit & Auto-Purge**: Tab media sosial yang tidak disentuh selama 2 menit otomatis dimatikan dari RAM (0 MB).
 3. **Multi-Account Terisolasi (Isolated WKWebsiteDataStore)**: Login multi-akun tanpa risiko tertukar atau logout otomatis.
 4. **Hybrid Routing**: Obrolan akun utama (Primary) langsung terhubung ke aplikasi native resmi untuk performa tercepat, sementara akun sekunder berjalan di dalam WebKit terisolasi.
 5. **Built-in Media Tools**: Dilengkapi *Smart Auto-Scroll* dan *1-Click Video Downloader* dengan pilihan kualitas langsung ke folder `~/Downloads`.
