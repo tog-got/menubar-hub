@@ -325,7 +325,22 @@ public class NotificationBridge: NSObject, WKScriptMessageHandler {
                 });
             }
 
-            setInterval(setupVideoListeners, 700);
+            var setupTimer = null;
+            function scheduleVideoListeners() {
+                if (setupTimer) return;
+                setupTimer = setTimeout(function() {
+                    setupTimer = null;
+                    setupVideoListeners();
+                }, 2000);
+            }
+
+            var domObserver = new MutationObserver(function() {
+                scheduleVideoListeners();
+            });
+            if (document.body) {
+                domObserver.observe(document.body, { childList: true, subtree: true });
+            }
+            scheduleVideoListeners();
         })();
         """
     }

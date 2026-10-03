@@ -4,5 +4,6 @@ MenuBarHub.app
 *.o
 *.swiftdoc
 *.swiftmodule
+*.zip
 .DS_Store
 /tmp/MenuBarHub.iconset

@@ -9,8 +9,8 @@ public class TabManager {
     private var webViews: [String: WKWebView] = [:]
     private var purgeTimers: [String: Timer] = [:]
     
-    // Grace period 2 menit (120 detik)
-    public let gracePeriodSeconds: TimeInterval = 120.0
+    // Grace period 1 menit (60 detik) untuk pemulihan RAM cepat
+    public let gracePeriodSeconds: TimeInterval = 60.0
     
     // User Agent modern agar WhatsApp Web dan Instagram tidak menolak
     public let customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
